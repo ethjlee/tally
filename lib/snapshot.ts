@@ -20,7 +20,7 @@ const isoTimestamp = z.string().max(40).refine(
   "Invalid timestamp"
 );
 
-const habit = z.object({
+const habitV4 = z.object({
   id,
   name,
   type: z.enum(["good", "bad"]),
@@ -29,11 +29,24 @@ const habit = z.object({
   lastDate: dateKey.nullable(),
   order: z.number().int().min(0).max(1_000_000)
 }).strict();
+const habit = habitV4.extend({
+  sectionId: id.nullable()
+}).strict();
 
-const bonusTask = z.object({
+const bonusTaskV4 = z.object({
   id,
   name,
   points: z.number().int().min(1).max(999),
+  order: z.number().int().min(0).max(1_000_000)
+}).strict();
+const bonusTask = bonusTaskV4.extend({
+  sectionId: id.nullable()
+}).strict();
+
+const taskSection = z.object({
+  id,
+  name: z.string().trim().min(1).max(40),
+  kind: z.enum(["good", "bad", "bonus"]),
   order: z.number().int().min(0).max(1_000_000)
 }).strict();
 
@@ -87,6 +100,7 @@ function uniqueBy<T>(
 }
 
 const dataShape = {
+  taskSections: z.array(taskSection).max(1_000),
   habits: z.array(habit).max(1_000),
   bonusTasks: z.array(bonusTask).max(1_000),
   milestones: z.array(milestone).max(1_000),
@@ -95,20 +109,33 @@ const dataShape = {
 };
 const validateCollections = (
   value: {
-    habits: Array<{ id: string }>;
-    bonusTasks: Array<{ id: string }>;
+    taskSections?: Array<{ id: string; kind: "good" | "bad" | "bonus" }>;
+    habits: Array<{ id: string; type?: "good" | "bad"; sectionId?: string | null }>;
+    bonusTasks: Array<{ id: string; sectionId?: string | null }>;
     milestones: Array<{ id: string }>;
     completedDays: Array<{ id: string; date: string }>;
     entries: Array<{ id: string }>;
   },
   context: z.RefinementCtx
 ) => {
+  uniqueBy(value.taskSections || [], (item) => item.id, context, "Task sections");
   uniqueBy(value.habits, (item) => item.id, context, "Habits");
   uniqueBy(value.bonusTasks, (item) => item.id, context, "Bonus entries");
   uniqueBy(value.milestones, (item) => item.id, context, "Milestones");
   uniqueBy(value.completedDays, (item) => item.id, context, "Completed days");
   uniqueBy(value.completedDays, (item) => item.date, context, "Completed-day dates");
   uniqueBy(value.entries, (item) => item.id, context, "Entries");
+  const sections = new Map((value.taskSections || []).map(section => [section.id, section.kind]));
+  value.habits.forEach((habit, index) => {
+    if (habit.sectionId && sections.get(habit.sectionId) !== habit.type) {
+      context.addIssue({ code: "custom", message: `Habit ${index + 1} references an incompatible task section.` });
+    }
+  });
+  value.bonusTasks.forEach((bonus, index) => {
+    if (bonus.sectionId && sections.get(bonus.sectionId) !== "bonus") {
+      context.addIssue({ code: "custom", message: `Bonus entry ${index + 1} references an incompatible task section.` });
+    }
+  });
 };
 const data = z.object(dataShape).strict().superRefine(validateCollections);
 
@@ -133,9 +160,9 @@ const settings = z.object({
   }).strict()
 }).strict();
 
-const snapshotV4Schema = z.object({
+const snapshotV5Schema = z.object({
   app: z.literal("Tally"),
-  schemaVersion: z.literal(4),
+  schemaVersion: z.literal(5),
   savedAt: isoTimestamp.optional(),
   revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   writerId: id.nullable().optional(),
@@ -143,15 +170,33 @@ const snapshotV4Schema = z.object({
   settings
 }).strict();
 
-// Rolling deployment compatibility: the previously deployed client and the
-// already-encrypted cloud row use schema 3. Accept it during GET/PUT so the new
-// client can load it and write schema 4 without downtime or a database migration.
-const legacyHabitV3 = habit.omit({ order: true });
-const legacyBonusTaskV3 = bonusTask.omit({ order: true });
+// Rolling deployment compatibility: accept both earlier encrypted cloud
+// snapshots so a new client can load them and write schema 5 without downtime.
+const legacyDataV4 = z.object({
+  habits: z.array(habitV4).max(1_000),
+  bonusTasks: z.array(bonusTaskV4).max(1_000),
+  milestones: z.array(milestone).max(1_000),
+  completedDays: z.array(completedDay).max(100_000),
+  entries: z.array(entry).max(100_000)
+}).strict().superRefine(validateCollections);
+const snapshotV4Schema = z.object({
+  app: z.literal("Tally"),
+  schemaVersion: z.literal(4),
+  savedAt: isoTimestamp.optional(),
+  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  writerId: id.nullable().optional(),
+  data: legacyDataV4,
+  settings
+}).strict();
+
+const legacyHabitV3 = habitV4.omit({ order: true });
+const legacyBonusTaskV3 = bonusTaskV4.omit({ order: true });
 const legacyDataV3 = z.object({
-  ...dataShape,
   habits: z.array(legacyHabitV3).max(1_000),
-  bonusTasks: z.array(legacyBonusTaskV3).max(1_000)
+  bonusTasks: z.array(legacyBonusTaskV3).max(1_000),
+  milestones: z.array(milestone).max(1_000),
+  completedDays: z.array(completedDay).max(100_000),
+  entries: z.array(entry).max(100_000)
 }).strict().superRefine(validateCollections);
 const legacySettingsV3 = settings.omit({ taskSortModes: true });
 const snapshotV3Schema = z.object({
@@ -164,7 +209,7 @@ const snapshotV3Schema = z.object({
   settings: legacySettingsV3
 }).strict();
 
-export const snapshotSchema = z.union([snapshotV4Schema, snapshotV3Schema]);
+export const snapshotSchema = z.union([snapshotV5Schema, snapshotV4Schema, snapshotV3Schema]);
 
 export const syncPutSchema = z.object({
   baseRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),

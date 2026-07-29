@@ -1,6 +1,7 @@
 /* ================= state ================= */
-let habits = [];      // {id, name, type:'good'|'bad', points, streak, lastDate, order}
-let bonusTasks = [];  // {id, name, points, order}
+let habits = [];      // {id, name, type:'good'|'bad', points, streak, lastDate, order, sectionId}
+let bonusTasks = [];  // {id, name, points, order, sectionId}
+let taskSections = []; // {id, name, kind:'good'|'bad'|'bonus', order}
 let entries = [];     // {id, date, name, type:'good'|'bad'|'bonus', points, ts}
 let milestones = [];  // {id, name, days, points, description}
 let completedDays = []; // {id, date, ts}; explicit no-entry day confirmations
@@ -17,6 +18,8 @@ let storageAvailable = true;
 let editingHabitId = null;
 let editingBonusId = null;
 let editingMilestoneId = null;
+let editingTaskSectionId = null;
+let taskSectionKindDraft = 'good';
 let editingEntryId = null;
 let entryModalMode = 'edit'; // 'edit' | 'create' — drives whether saving updates or inserts
 let selectedDayKey = null;
@@ -173,18 +176,33 @@ function taskUsageCounts(kind, list){
   }
   return counts;
 }
-function manualTaskItems(kind){
-  return taskItems(kind).slice().sort((a, b) =>
+function sectionIdValue(value){
+  return value && value !== 'unsectioned' ? value : null;
+}
+function sectionsForKind(kind){
+  return taskSections.filter(section => section.kind === kind).slice().sort((a, b) =>
     (Number(a.order) || 0) - (Number(b.order) || 0) ||
     a.name.localeCompare(b.name) ||
     a.id.localeCompare(b.id)
   );
 }
-function sortedTaskItems(kind){
+function taskSectionFor(kind, sectionId){
+  const normalized = sectionIdValue(sectionId);
+  return normalized ? taskSections.find(section => section.id === normalized && section.kind === kind) || null : null;
+}
+function manualTaskItems(kind, sectionId){
+  const normalized = sectionIdValue(sectionId);
+  return taskItems(kind).filter(item => sectionIdValue(item.sectionId) === normalized).slice().sort((a, b) =>
+    (Number(a.order) || 0) - (Number(b.order) || 0) ||
+    a.name.localeCompare(b.name) ||
+    a.id.localeCompare(b.id)
+  );
+}
+function sortedTaskItems(kind, sectionId){
   const mode = taskSortModes[kind] || 'manual';
-  const list = manualTaskItems(kind);
+  const list = manualTaskItems(kind, sectionId);
   const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity:'base' }) || a.id.localeCompare(b.id);
-  const usage = mode === 'usage-desc' || mode === 'usage-asc' ? taskUsageCounts(kind, list) : null;
+  const usage = mode === 'usage-desc' || mode === 'usage-asc' ? taskUsageCounts(kind, taskItems(kind)) : null;
   if(mode === 'name-asc') return list.sort(byName);
   if(mode === 'name-desc') return list.sort((a, b) => -byName(a, b));
   if(mode === 'usage-desc') return list.sort((a, b) => usage.get(b.id) - usage.get(a.id) || byName(a, b));
@@ -193,36 +211,87 @@ function sortedTaskItems(kind){
   if(mode === 'points-asc') return list.sort((a, b) => a.points - b.points || byName(a, b));
   return list;
 }
-function nextTaskOrder(kind, excludeId){
-  const values = taskItems(kind).filter(item => item.id !== excludeId).map(item => Number(item.order) || 0);
+function nextTaskOrder(kind, sectionId, excludeId){
+  const normalized = sectionIdValue(sectionId);
+  const values = taskItems(kind)
+    .filter(item => item.id !== excludeId && sectionIdValue(item.sectionId) === normalized)
+    .map(item => Number(item.order) || 0);
   return values.length ? Math.max(...values) + 1 : 0;
 }
-function taskOrderControls(kind, item, index, total){
-  if(taskSortModes[kind] !== 'manual' || total < 2) return '';
-  return `<span class="task-order-controls" aria-label="Manual order controls">
-    <button type="button" class="order-btn" data-action="move-task" data-kind="${kind}" data-id="${escapeHtml(item.id)}" data-direction="-1" ${index === 0 ? 'disabled' : ''} aria-label="Move ${escapeHtml(item.name)} up">↑</button>
-    <button type="button" class="order-btn" data-action="move-task" data-kind="${kind}" data-id="${escapeHtml(item.id)}" data-direction="1" ${index === total - 1 ? 'disabled' : ''} aria-label="Move ${escapeHtml(item.name)} down">↓</button>
-  </span>`;
+function nextTaskSectionOrder(kind, excludeId){
+  const values = sectionsForKind(kind).filter(section => section.id !== excludeId).map(section => Number(section.order) || 0);
+  return values.length ? Math.max(...values) + 1 : 0;
 }
-function moveTask(kind, id, rawDirection){
-  if(!['good','bad','bonus'].includes(kind) || taskSortModes[kind] !== 'manual') return;
-  const list = manualTaskItems(kind);
-  const index = list.findIndex(item => item.id === id);
-  const direction = Number(rawDirection) < 0 ? -1 : 1;
-  const targetIndex = index + direction;
-  if(index < 0 || targetIndex < 0 || targetIndex >= list.length) return;
-  list.forEach((item, order) => { item.order = order; });
-  const current = list[index];
-  const target = list[targetIndex];
-  const currentOrder = current.order;
-  current.order = target.order;
-  target.order = currentOrder;
+function setReorderStatus(message){
+  const status = document.getElementById('reorderStatus');
+  if(status) status.textContent = message;
+}
+function moveTaskToPosition(kind, id, rawSectionId, beforeId){
+  if(!['good','bad','bonus'].includes(kind) || taskSortModes[kind] !== 'manual') return false;
+  const task = taskItems(kind).find(item => item.id === id);
+  if(!task) return false;
+  const targetSectionId = sectionIdValue(rawSectionId);
+  if(targetSectionId && !taskSectionFor(kind, targetSectionId)) return false;
+  const sourceSectionId = sectionIdValue(task.sectionId);
+  const sourceRemaining = manualTaskItems(kind, sourceSectionId).filter(item => item.id !== id);
+  const targetRemaining = sourceSectionId === targetSectionId
+    ? sourceRemaining
+    : manualTaskItems(kind, targetSectionId).filter(item => item.id !== id);
+  let insertionIndex = beforeId ? targetRemaining.findIndex(item => item.id === beforeId) : targetRemaining.length;
+  if(insertionIndex < 0) insertionIndex = targetRemaining.length;
+  targetRemaining.splice(insertionIndex, 0, task);
+  task.sectionId = targetSectionId;
+  sourceRemaining.forEach((item, order) => { item.order = order; });
+  targetRemaining.forEach((item, order) => { item.order = order; });
   persistData();
   renderAll();
-  setTimeout(() => {
-    const moved = document.querySelector(`[data-action="move-task"][data-kind="${kind}"][data-id="${id}"][data-direction="${rawDirection}"]`);
-    if(moved && !moved.disabled) moved.focus();
-  }, 0);
+  const sectionName = taskSectionFor(kind, targetSectionId)?.name || 'Unsectioned';
+  setReorderStatus(`${task.name} moved to ${sectionName}, position ${insertionIndex + 1}.`);
+  return true;
+}
+function moveTaskByKeyboard(kind, id, key){
+  const task = taskItems(kind).find(item => item.id === id);
+  if(!task || taskSortModes[kind] !== 'manual') return false;
+  const sectionId = sectionIdValue(task.sectionId);
+  const list = manualTaskItems(kind, sectionId);
+  const index = list.findIndex(item => item.id === id);
+  if(index < 0) return false;
+  let targetSectionId = sectionId;
+  let beforeId = null;
+  if(key === 'ArrowUp' && index > 0) beforeId = list[index - 1].id;
+  else if(key === 'ArrowDown' && index < list.length - 1) beforeId = list[index + 2]?.id || null;
+  else if(key === 'Home'){
+    if(index === 0) return false;
+    beforeId = list[0].id;
+  }
+  else if(key === 'End'){
+    if(index === list.length - 1) return false;
+    beforeId = null;
+  }
+  else if(key === 'ArrowLeft' || key === 'ArrowRight'){
+    const sectionIds = [null, ...sectionsForKind(kind).map(section => section.id)];
+    const currentSectionIndex = sectionIds.findIndex(value => value === sectionId);
+    const direction = key === 'ArrowLeft' ? -1 : 1;
+    const targetIndex = currentSectionIndex + direction;
+    if(targetIndex < 0 || targetIndex >= sectionIds.length) return false;
+    targetSectionId = sectionIds[targetIndex];
+  }else{
+    return false;
+  }
+  return moveTaskToPosition(kind, id, targetSectionId, beforeId);
+}
+function taskDragHandle(kind, item){
+  const manual = taskSortModes[kind] === 'manual';
+  const hint = manual
+    ? `Drag ${item.name}. Keyboard: Up or Down reorders; Left or Right changes section.`
+    : `Switch ${kind === 'good' ? 'Credits' : kind === 'bad' ? 'Debits' : 'Bonus entries'} to Manual sorting to rearrange.`;
+  return `<button type="button" class="drag-handle${manual ? '' : ' inactive'}" data-drag-handle data-kind="${kind}" data-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(hint)}" title="${escapeHtml(hint)}">
+    <svg viewBox="0 0 18 26" aria-hidden="true" focusable="false">
+      <circle cx="5" cy="5" r="2.2"></circle><circle cx="13" cy="5" r="2.2"></circle>
+      <circle cx="5" cy="13" r="2.2"></circle><circle cx="13" cy="13" r="2.2"></circle>
+      <circle cx="5" cy="21" r="2.2"></circle><circle cx="13" cy="21" r="2.2"></circle>
+    </svg>
+  </button>`;
 }
 function setTaskSortMode(kind, mode){
   if(!['good','bad','bonus'].includes(kind) || !TASK_SORT_OPTIONS.some(option => option[0] === mode)) return;
@@ -331,7 +400,7 @@ function allActivityEntries(end = todayKey()){
 }
 
 /* ================= persistence ================= */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const DB_NAME = 'tally-ledger';
 const DB_VERSION = 1;
 const DB_STORE = 'records';
@@ -420,7 +489,7 @@ function validateBackupObject(parsed){
   let data;
   let settings;
   let revision = 0;
-  if(parsed.schemaVersion === SCHEMA_VERSION || parsed.schemaVersion === 3 || parsed.schemaVersion === 2){
+  if(parsed.schemaVersion === SCHEMA_VERSION || parsed.schemaVersion === 4 || parsed.schemaVersion === 3 || parsed.schemaVersion === 2){
     data = parsed.data;
     settings = parsed.settings;
     revision = Number.isInteger(parsed.revision) && parsed.revision >= 0 ? parsed.revision : 0;
@@ -431,6 +500,17 @@ function validateBackupObject(parsed){
     throw new Error('This is not a recognized Tally backup.');
   }
   if(!isPlainObject(data) || !isPlainObject(settings)) throw new Error('The backup is missing ledger data or settings.');
+
+  const cleanTaskSections = requireArray(data.taskSections == null ? [] : data.taskSections, 'Task sections').map((section, i) => {
+    if(!isPlainObject(section)) throw new Error(`Task section ${i + 1} is invalid.`);
+    if(!['good','bad','bonus'].includes(section.kind)) throw new Error(`Task section ${i + 1} has an invalid type.`);
+    return {
+      id:requireId(section.id, `Task section ${i + 1} ID`),
+      name:requireString(section.name, `Task section ${i + 1} name`, 40),
+      kind:section.kind,
+      order:requireInteger(section.order == null ? i : section.order, `Task section ${i + 1} order`, 0, 1000000)
+    };
+  });
 
   const cleanHabits = requireArray(data.habits, 'Habits').map((h, i) => {
     if(!isPlainObject(h)) throw new Error(`Habit ${i + 1} is invalid.`);
@@ -445,7 +525,8 @@ function validateBackupObject(parsed){
       points: requireInteger(h.points, `Habit ${i + 1} points`, 1, 999),
       streak: requireInteger(h.streak == null ? 0 : h.streak, `Habit ${i + 1} streak`, 0, 100000),
       lastDate,
-      order: requireInteger(h.order == null ? i : h.order, `Habit ${i + 1} order`, 0, 1000000)
+      order: requireInteger(h.order == null ? i : h.order, `Habit ${i + 1} order`, 0, 1000000),
+      sectionId: h.sectionId == null ? null : requireId(h.sectionId, `Habit ${i + 1} section ID`)
     };
   });
 
@@ -455,7 +536,8 @@ function validateBackupObject(parsed){
       id: requireId(b.id, `Bonus entry ${i + 1} ID`),
       name: requireString(b.name, `Bonus entry ${i + 1} name`, 60),
       points: requireInteger(b.points, `Bonus entry ${i + 1} points`, 1, 999),
-      order: requireInteger(b.order == null ? i : b.order, `Bonus entry ${i + 1} order`, 0, 1000000)
+      order: requireInteger(b.order == null ? i : b.order, `Bonus entry ${i + 1} order`, 0, 1000000),
+      sectionId: b.sectionId == null ? null : requireId(b.sectionId, `Bonus entry ${i + 1} section ID`)
     };
   });
 
@@ -500,12 +582,24 @@ function validateBackupObject(parsed){
     return clean;
   });
 
+  ensureUniqueIds(cleanTaskSections, 'Task sections');
   ensureUniqueIds(cleanHabits, 'Habits');
   ensureUniqueIds(cleanBonuses, 'Bonus entries');
   ensureUniqueIds(cleanMilestones, 'Milestones');
   ensureUniqueIds(cleanCompletedDays, 'Completed days');
   ensureUniqueDates(cleanCompletedDays, 'Completed days');
   ensureUniqueIds(cleanEntries, 'Logged entries');
+  const sectionsById = new Map(cleanTaskSections.map(section => [section.id, section]));
+  cleanHabits.forEach((habit, index) => {
+    if(habit.sectionId && sectionsById.get(habit.sectionId)?.kind !== habit.type){
+      throw new Error(`Habit ${index + 1} references a missing or incompatible section.`);
+    }
+  });
+  cleanBonuses.forEach((bonus, index) => {
+    if(bonus.sectionId && sectionsById.get(bonus.sectionId)?.kind !== 'bonus'){
+      throw new Error(`Bonus entry ${index + 1} references a missing or incompatible section.`);
+    }
+  });
 
   const cleanDailyBase = requireInteger(settings.dailyBase == null ? 100 : settings.dailyBase, 'Daily base', 0, 9999);
   const cleanThreshold = requireInteger(settings.successThreshold == null ? 80 : settings.successThreshold, 'Success threshold', 0, 9999);
@@ -537,6 +631,7 @@ function validateBackupObject(parsed){
   return {
     revision,
     writerId: parsed.writerId && SAFE_ID.test(parsed.writerId) ? parsed.writerId : null,
+    taskSections: cleanTaskSections,
     habits: cleanHabits,
     bonusTasks: cleanBonuses,
     milestones: cleanMilestones,
@@ -561,6 +656,7 @@ function buildSnapshot(){
     revision: stateRevision,
     writerId: CLIENT_ID,
     data: {
+      taskSections: taskSections.map(section => ({ ...section })),
       habits: habits.map(h => ({ ...h })),
       bonusTasks: bonusTasks.map(b => ({ ...b })),
       milestones: milestones.map(m => ({ ...m })),
@@ -579,6 +675,7 @@ function buildExport(){
   return snapshot;
 }
 function applyValidatedState(clean){
+  taskSections = clean.taskSections;
   habits = clean.habits;
   bonusTasks = clean.bonusTasks;
   milestones = clean.milestones;
@@ -744,6 +841,7 @@ function snapshotFromClean(clean){
     revision:clean.revision || 0,
     writerId:clean.writerId || null,
     data:{
+      taskSections:clean.taskSections.map(item => ({ ...item })),
       habits:clean.habits.map(item => ({ ...item })),
       bonusTasks:clean.bonusTasks.map(item => ({ ...item })),
       milestones:clean.milestones.map(item => ({ ...item })),
@@ -793,11 +891,12 @@ function mergeConcurrentSnapshots(baseSnapshot, localSnapshot, remoteSnapshot){
   const base = baseSnapshot || remoteSnapshot;
   const habitsMerge = mergeEntitiesById(base.data.habits, localSnapshot.data.habits, remoteSnapshot.data.habits);
   const bonusMerge = mergeEntitiesById(base.data.bonusTasks, localSnapshot.data.bonusTasks, remoteSnapshot.data.bonusTasks);
+  const taskSectionMerge = mergeEntitiesById(base.data.taskSections || [], localSnapshot.data.taskSections || [], remoteSnapshot.data.taskSections || []);
   const milestoneMerge = mergeEntitiesById(base.data.milestones, localSnapshot.data.milestones, remoteSnapshot.data.milestones);
   const completedDayMerge = mergeEntitiesById(base.data.completedDays, localSnapshot.data.completedDays, remoteSnapshot.data.completedDays);
   const entryMerge = mergeEntitiesById(base.data.entries, localSnapshot.data.entries, remoteSnapshot.data.entries);
   const settings = {};
-  let hadDirectConflict = habitsMerge.hadDirectConflict || bonusMerge.hadDirectConflict ||
+  let hadDirectConflict = habitsMerge.hadDirectConflict || bonusMerge.hadDirectConflict || taskSectionMerge.hadDirectConflict ||
     milestoneMerge.hadDirectConflict || completedDayMerge.hadDirectConflict || entryMerge.hadDirectConflict;
   for(const key of ['dailyBase','successThreshold','dayStartHour','trackingStartDate','lastBackupAt','historyRangeDays','backupReminderDays','taskSortModes']){
     const b = base.settings[key];
@@ -837,6 +936,7 @@ function mergeConcurrentSnapshots(baseSnapshot, localSnapshot, remoteSnapshot){
       revision:Math.max(localSnapshot.revision || 0, remoteSnapshot.revision || 0),
       writerId:CLIENT_ID,
       data:{
+        taskSections:taskSectionMerge.items,
         habits:habitsMerge.items,
         bonusTasks:bonusMerge.items,
         milestones:milestoneMerge.items,
@@ -1120,6 +1220,7 @@ async function loadAll(){
         const legacySettingsRaw = safeLocalGet('tally-settings');
         const legacySettings = legacySettingsRaw ? JSON.parse(legacySettingsRaw) : legacyData;
         parseCandidate({
+          taskSections: legacyData.taskSections || [],
           habits: legacyData.habits || [],
           bonusTasks: legacyData.bonusTasks || [],
           entries: legacyData.entries || [],
@@ -1315,7 +1416,7 @@ function cloudMergeBase(reference){
     schemaVersion:SCHEMA_VERSION,
     revision:0,
     writerId:null,
-    data:{ habits:[], bonusTasks:[], milestones:[], completedDays:[], entries:[] },
+    data:{ taskSections:[], habits:[], bonusTasks:[], milestones:[], completedDays:[], entries:[] },
     settings:cloneJson(reference.settings)
   };
 }
@@ -1822,6 +1923,18 @@ function recomputeAllHabitStreaks(){
 }
 
 /* ---- habit modal ---- */
+function populateTaskSectionSelect(elementId, kind, selectedSectionId){
+  const select = document.getElementById(elementId);
+  if(!select) return;
+  const selected = sectionIdValue(selectedSectionId);
+  select.innerHTML = [
+    '<option value="">Unsectioned</option>',
+    ...sectionsForKind(kind).map(section =>
+      `<option value="${escapeHtml(section.id)}">${escapeHtml(section.name)}</option>`
+    )
+  ].join('');
+  select.value = selected && taskSectionFor(kind, selected) ? selected : '';
+}
 function openHabitModal(type, id){
   editingHabitId = id || null;
   const title = document.getElementById('habitModalTitle');
@@ -1834,12 +1947,14 @@ function openHabitModal(type, id){
     document.getElementById('habitName').value = h.name;
     document.getElementById('habitPoints').value = h.points;
     setHabitType(h.type);
+    populateTaskSectionSelect('habitSectionInput', h.type, h.sectionId);
     title.textContent = 'Edit ' + (h.type === 'good' ? 'credit' : 'debit');
     delBtn.style.display = 'block';
   } else {
     document.getElementById('habitName').value = '';
     document.getElementById('habitPoints').value = '';
     setHabitType(type || 'good');
+    populateTaskSectionSelect('habitSectionInput', type || 'good', null);
     title.textContent = 'Add ' + (type === 'bad' ? 'debit' : 'credit');
     delBtn.style.display = 'none';
   }
@@ -1857,6 +1972,7 @@ function setHabitType(type){
   document.getElementById('segBad').classList.toggle('bad', true);
   document.getElementById('pointsLabel').textContent = type === 'good' ? 'Points earned' : 'Points lost';
   document.getElementById('habitHint').style.display = type === 'good' ? 'block' : 'none';
+  populateTaskSectionSelect('habitSectionInput', type, null);
 }
 function showFieldError(id, message, focusId){
   const el = document.getElementById(id);
@@ -1874,6 +1990,7 @@ function saveHabit(){
   const name = document.getElementById('habitName').value.trim();
   const pointsRaw = document.getElementById('habitPoints').value;
   const points = Number(pointsRaw);
+  const sectionId = sectionIdValue(document.getElementById('habitSectionInput').value);
   clearFieldError('habitError');
   if(!name) return showFieldError('habitError', 'Enter a habit name.', 'habitName');
   if(!Number.isInteger(points) || points < 1 || points > 999){
@@ -1883,10 +2000,12 @@ function saveHabit(){
     const h = habits.find(x => x.id === editingHabitId);
     if(!h) return showFieldError('habitError', 'This habit no longer exists. Close and try again.');
     const typeChanged = h.type !== habitTypeDraft;
-    if(typeChanged) h.order = nextTaskOrder(habitTypeDraft, h.id);
+    const sectionChanged = sectionIdValue(h.sectionId) !== sectionId;
+    if(typeChanged || sectionChanged) h.order = nextTaskOrder(habitTypeDraft, sectionId, h.id);
     h.name = name;
     h.points = points;
     h.type = habitTypeDraft;
+    h.sectionId = sectionId;
     if(typeChanged){
       if(h.type === 'good') recomputeHabitStreak(h);
       else { h.streak = 0; h.lastDate = null; }
@@ -1894,7 +2013,7 @@ function saveHabit(){
   } else {
     habits.push({
       id: uid(), name, type: habitTypeDraft, points, streak:0, lastDate:null,
-      order:nextTaskOrder(habitTypeDraft)
+      order:nextTaskOrder(habitTypeDraft, sectionId), sectionId
     });
   }
   persistData();
@@ -1923,11 +2042,13 @@ function openBonusModal(id){
     if(!b) return;
     document.getElementById('bonusName').value = b.name;
     document.getElementById('bonusPoints').value = b.points;
+    populateTaskSectionSelect('bonusSectionInput', 'bonus', b.sectionId);
     title.textContent = 'Edit bonus entry';
     delBtn.style.display = 'block';
   } else {
     document.getElementById('bonusName').value = '';
     document.getElementById('bonusPoints').value = '';
+    populateTaskSectionSelect('bonusSectionInput', 'bonus', null);
     title.textContent = 'Add bonus entry';
     delBtn.style.display = 'none';
   }
@@ -1940,6 +2061,7 @@ function closeBonusModal(){
 function saveBonus(){
   const name = document.getElementById('bonusName').value.trim();
   const points = Number(document.getElementById('bonusPoints').value);
+  const sectionId = sectionIdValue(document.getElementById('bonusSectionInput').value);
   clearFieldError('bonusError');
   if(!name) return showFieldError('bonusError', 'Enter a bonus name.', 'bonusName');
   if(!Number.isInteger(points) || points < 1 || points > 999){
@@ -1948,9 +2070,10 @@ function saveBonus(){
   if(editingBonusId){
     const b = bonusTasks.find(x => x.id === editingBonusId);
     if(!b) return showFieldError('bonusError', 'This bonus entry no longer exists. Close and try again.');
-    b.name = name; b.points = points;
+    if(sectionIdValue(b.sectionId) !== sectionId) b.order = nextTaskOrder('bonus', sectionId, b.id);
+    b.name = name; b.points = points; b.sectionId = sectionId;
   } else {
-    bonusTasks.push({ id:uid(), name, points, order:nextTaskOrder('bonus') });
+    bonusTasks.push({ id:uid(), name, points, order:nextTaskOrder('bonus', sectionId), sectionId });
   }
   persistData();
   closeBonusModal();
@@ -1965,6 +2088,70 @@ async function deleteBonusConfirm(){
     closeBonusModal();
     renderAll();
   }
+}
+
+/* ---- custom task sections ---- */
+function taskKindLabel(kind){
+  return kind === 'good' ? 'Credits' : kind === 'bad' ? 'Debits' : 'Bonus entries';
+}
+function openTaskSectionModal(kind, id){
+  const section = id ? taskSections.find(item => item.id === id) : null;
+  taskSectionKindDraft = section?.kind || (['good','bad','bonus'].includes(kind) ? kind : 'good');
+  editingTaskSectionId = section?.id || null;
+  document.getElementById('taskSectionName').value = section?.name || '';
+  document.getElementById('taskSectionModalTitle').textContent = section ? 'Edit section' : 'Add section';
+  document.getElementById('taskSectionKindHint').textContent =
+    `This section belongs to ${taskKindLabel(taskSectionKindDraft)}. Tasks can only move between sections of the same type.`;
+  document.getElementById('deleteTaskSectionBtn').style.display = section ? 'block' : 'none';
+  clearFieldError('taskSectionError');
+  openDialog('taskSectionOverlay', 'taskSectionName');
+}
+function closeTaskSectionModal(){
+  closeDialog('taskSectionOverlay');
+  editingTaskSectionId = null;
+}
+function saveTaskSection(){
+  const name = document.getElementById('taskSectionName').value.trim();
+  clearFieldError('taskSectionError');
+  if(!name) return showFieldError('taskSectionError', 'Enter a section name.', 'taskSectionName');
+  const duplicate = taskSections.some(section =>
+    section.kind === taskSectionKindDraft &&
+    section.id !== editingTaskSectionId &&
+    section.name.localeCompare(name, undefined, { sensitivity:'base' }) === 0
+  );
+  if(duplicate) return showFieldError('taskSectionError', 'A section with that name already exists here.', 'taskSectionName');
+  if(editingTaskSectionId){
+    const section = taskSections.find(item => item.id === editingTaskSectionId);
+    if(!section) return showFieldError('taskSectionError', 'This section no longer exists. Close and try again.');
+    section.name = name;
+  }else{
+    taskSections.push({
+      id:uid(), name, kind:taskSectionKindDraft,
+      order:nextTaskSectionOrder(taskSectionKindDraft)
+    });
+  }
+  persistData();
+  closeTaskSectionModal();
+  renderAll();
+}
+async function deleteTaskSectionConfirm(){
+  const section = taskSections.find(item => item.id === editingTaskSectionId);
+  if(!section) return;
+  const affected = taskItems(section.kind).filter(item => item.sectionId === section.id);
+  const ok = await showConfirm(
+    `Delete “${section.name}”? Its ${affected.length} entr${affected.length === 1 ? 'y' : 'ies'} will move to Unsectioned; no tasks or history will be deleted.`,
+    'Delete section'
+  );
+  if(!ok) return;
+  let order = nextTaskOrder(section.kind, null);
+  manualTaskItems(section.kind, section.id).forEach(item => {
+    item.sectionId = null;
+    item.order = order++;
+  });
+  taskSections = taskSections.filter(item => item.id !== section.id);
+  persistData();
+  closeTaskSectionModal();
+  renderAll();
 }
 
 /* ---- automatic success milestones ---- */
@@ -2125,7 +2312,7 @@ function markBackupCompleted(exportedAt){
 }
 
 function hasAnyLedgerData(){
-  return entries.length || habits.length || bonusTasks.length || milestones.length || completedDays.length;
+  return entries.length || habits.length || bonusTasks.length || taskSections.length || milestones.length || completedDays.length;
 }
 function describeDaysSince(iso){
   const ms = new Date(iso).getTime();
@@ -2164,6 +2351,7 @@ function dismissReminder(){
 // the destructive-action confirmations so nothing is cleared blind.
 function ledgerCountsSentence(){
   const parts = [
+    `${taskSections.length} custom section${taskSections.length === 1 ? '' : 's'}`,
     `${habits.length} habit${habits.length === 1 ? '' : 's'}`,
     `${bonusTasks.length} bonus entr${bonusTasks.length === 1 ? 'y' : 'ies'}`,
     `${milestones.length} milestone${milestones.length === 1 ? '' : 's'}`,
@@ -2216,7 +2404,7 @@ function setBackupStatus(message, tone){
   el.className = `status-message${tone ? ` ${tone}` : ''}`;
 }
 function backupContentsLabel(clean){
-  return `${clean.habits.length} habit${clean.habits.length === 1 ? '' : 's'}, ${clean.bonusTasks.length} bonus entr${clean.bonusTasks.length === 1 ? 'y' : 'ies'}, ${clean.milestones.length} milestone${clean.milestones.length === 1 ? '' : 's'}, ${clean.completedDays.length} completed day${clean.completedDays.length === 1 ? '' : 's'}, and ${clean.entries.length} logged entr${clean.entries.length === 1 ? 'y' : 'ies'}`;
+  return `${clean.taskSections.length} custom section${clean.taskSections.length === 1 ? '' : 's'}, ${clean.habits.length} habit${clean.habits.length === 1 ? '' : 's'}, ${clean.bonusTasks.length} bonus entr${clean.bonusTasks.length === 1 ? 'y' : 'ies'}, ${clean.milestones.length} milestone${clean.milestones.length === 1 ? '' : 's'}, ${clean.completedDays.length} completed day${clean.completedDays.length === 1 ? '' : 's'}, and ${clean.entries.length} logged entr${clean.entries.length === 1 ? 'y' : 'ies'}`;
 }
 function triggerFileDownload(file){
   const url = URL.createObjectURL(file);
@@ -2280,7 +2468,7 @@ function csvCell(value, protectFormula){
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-const FULL_CSV_BACKUP_VERSION = '4';
+const FULL_CSV_BACKUP_VERSION = '5';
 const FULL_CSV_V1_HEADERS = [
   'format_version','record_type','revision','writer_id','id','name_json','type',
   'points','streak','last_date','ledger_date','timestamp_ms','habit_id','bonus_id',
@@ -2289,10 +2477,11 @@ const FULL_CSV_V1_HEADERS = [
 ];
 const FULL_CSV_V2_HEADERS = [...FULL_CSV_V1_HEADERS, 'threshold_days', 'description_json'];
 const FULL_CSV_V3_HEADERS = [...FULL_CSV_V2_HEADERS, 'backup_reminder_days'];
-const FULL_CSV_HEADERS = [
+const FULL_CSV_V4_HEADERS = [
   ...FULL_CSV_V3_HEADERS,
   'good_sort_mode','bad_sort_mode','bonus_sort_mode','manual_order'
 ];
+const FULL_CSV_HEADERS = [...FULL_CSV_V4_HEADERS, 'section_id'];
 function fullCsvRow(values){
   return FULL_CSV_HEADERS.map(header => values[header] == null ? '' : values[header]);
 }
@@ -2319,6 +2508,13 @@ function buildFullCsvBackup(){
       bad_sort_mode:snapshot.settings.taskSortModes.bad,
       bonus_sort_mode:snapshot.settings.taskSortModes.bonus
     }),
+    ...snapshot.data.taskSections.map(section => fullCsvRow({
+      record_type:'task_section',
+      id:section.id,
+      name_json:JSON.stringify(section.name),
+      type:section.kind,
+      manual_order:section.order
+    })),
     ...snapshot.data.habits.map(habit => fullCsvRow({
       record_type:'habit',
       id:habit.id,
@@ -2327,14 +2523,16 @@ function buildFullCsvBackup(){
       points:habit.points,
       streak:habit.streak,
       last_date:habit.lastDate || '',
-      manual_order:habit.order
+      manual_order:habit.order,
+      section_id:habit.sectionId || ''
     })),
     ...snapshot.data.bonusTasks.map(bonus => fullCsvRow({
       record_type:'bonus',
       id:bonus.id,
       name_json:JSON.stringify(bonus.name),
       points:bonus.points,
-      manual_order:bonus.order
+      manual_order:bonus.order,
+      section_id:bonus.sectionId || ''
     })),
     ...snapshot.data.milestones.map(milestone => fullCsvRow({
       record_type:'milestone',
@@ -2461,11 +2659,13 @@ function parseFullCsvBackup(raw){
     rows[0].length === headers.length && headers.every((header, index) => rows[0][index] === header);
   const headers = matchesHeaders(FULL_CSV_HEADERS)
     ? FULL_CSV_HEADERS
-    : (matchesHeaders(FULL_CSV_V3_HEADERS)
-      ? FULL_CSV_V3_HEADERS
-      : (matchesHeaders(FULL_CSV_V2_HEADERS)
-        ? FULL_CSV_V2_HEADERS
-        : (matchesHeaders(FULL_CSV_V1_HEADERS) ? FULL_CSV_V1_HEADERS : null)));
+    : (matchesHeaders(FULL_CSV_V4_HEADERS)
+      ? FULL_CSV_V4_HEADERS
+      : (matchesHeaders(FULL_CSV_V3_HEADERS)
+        ? FULL_CSV_V3_HEADERS
+        : (matchesHeaders(FULL_CSV_V2_HEADERS)
+          ? FULL_CSV_V2_HEADERS
+          : (matchesHeaders(FULL_CSV_V1_HEADERS) ? FULL_CSV_V1_HEADERS : null))));
   if(!headers){
     throw new Error('This is not a recognized Tally CSV backup.');
   }
@@ -2487,7 +2687,9 @@ function parseFullCsvBackup(raw){
   assertCsvFields(meta.values, ['format_version','record_type','revision','writer_id','exported_at'], meta.rowNumber, headers);
   const expectedVersion = headers === FULL_CSV_HEADERS
     ? FULL_CSV_BACKUP_VERSION
-    : (headers === FULL_CSV_V3_HEADERS ? '3' : (headers === FULL_CSV_V2_HEADERS ? '2' : '1'));
+    : (headers === FULL_CSV_V4_HEADERS
+      ? '4'
+      : (headers === FULL_CSV_V3_HEADERS ? '3' : (headers === FULL_CSV_V2_HEADERS ? '2' : '1')));
   if(meta.values.format_version !== expectedVersion){
     throw new Error(`CSV backup version ${meta.values.format_version || '(missing)'} is not supported.`);
   }
@@ -2513,14 +2715,24 @@ function parseFullCsvBackup(raw){
 
   const habits = [];
   const bonusTasks = [];
+  const restoredTaskSections = [];
   const restoredMilestones = [];
   const restoredCompletedDays = [];
   const restoredEntries = [];
   for(const record of records){
     const value = record.values;
     if(value.record_type === 'meta' || value.record_type === 'settings') continue;
-    if(value.record_type === 'habit'){
-      assertCsvFields(value, ['record_type','id','name_json','type','points','streak','last_date','manual_order'], record.rowNumber, headers);
+    if(value.record_type === 'task_section'){
+      if(headers !== FULL_CSV_HEADERS) throw new Error(`Row ${record.rowNumber} has an unsupported record type.`);
+      assertCsvFields(value, ['record_type','id','name_json','type','manual_order'], record.rowNumber, headers);
+      restoredTaskSections.push({
+        id:value.id,
+        name:csvBackupName(value.name_json, record.rowNumber),
+        kind:value.type,
+        order:csvBackupInteger(value.manual_order, `Row ${record.rowNumber} manual order`, 0, 1000000)
+      });
+    }else if(value.record_type === 'habit'){
+      assertCsvFields(value, ['record_type','id','name_json','type','points','streak','last_date','manual_order','section_id'], record.rowNumber, headers);
       const habit = {
         id:value.id,
         name:csvBackupName(value.name_json, record.rowNumber),
@@ -2529,20 +2741,22 @@ function parseFullCsvBackup(raw){
         streak:csvBackupInteger(value.streak, `Row ${record.rowNumber} streak`, 0, 100000),
         lastDate:value.last_date || null
       };
-      if(headers === FULL_CSV_HEADERS){
+      if(headers === FULL_CSV_HEADERS || headers === FULL_CSV_V4_HEADERS){
         habit.order = csvBackupInteger(value.manual_order, `Row ${record.rowNumber} manual order`, 0, 1000000);
       }
+      if(headers === FULL_CSV_HEADERS) habit.sectionId = value.section_id || null;
       habits.push(habit);
     }else if(value.record_type === 'bonus'){
-      assertCsvFields(value, ['record_type','id','name_json','points','manual_order'], record.rowNumber, headers);
+      assertCsvFields(value, ['record_type','id','name_json','points','manual_order','section_id'], record.rowNumber, headers);
       const bonus = {
         id:value.id,
         name:csvBackupName(value.name_json, record.rowNumber),
         points:csvBackupInteger(value.points, `Row ${record.rowNumber} points`, 1, 999)
       };
-      if(headers === FULL_CSV_HEADERS){
+      if(headers === FULL_CSV_HEADERS || headers === FULL_CSV_V4_HEADERS){
         bonus.order = csvBackupInteger(value.manual_order, `Row ${record.rowNumber} manual order`, 0, 1000000);
       }
+      if(headers === FULL_CSV_HEADERS) bonus.sectionId = value.section_id || null;
       bonusTasks.push(bonus);
     }else if(value.record_type === 'entry'){
       assertCsvFields(value, [
@@ -2591,6 +2805,7 @@ function parseFullCsvBackup(raw){
     writerId:meta.values.writer_id || null,
     exportedAt,
     data:{
+      taskSections:restoredTaskSections,
       habits,
       bonusTasks,
       milestones:restoredMilestones,
@@ -2606,10 +2821,10 @@ function parseFullCsvBackup(raw){
       lastBackupAt:settings.last_backup_at || null,
       // Version 1/2 CSV files predate this column. Default legacy imports to Off
       // rather than unexpectedly enabling reminders that the file could not express.
-      backupReminderDays:headers === FULL_CSV_HEADERS || headers === FULL_CSV_V3_HEADERS
+      backupReminderDays:headers === FULL_CSV_HEADERS || headers === FULL_CSV_V4_HEADERS || headers === FULL_CSV_V3_HEADERS
         ? csvBackupInteger(settings.backup_reminder_days, 'Backup reminder cadence', 0, 366)
         : 0,
-      taskSortModes:headers === FULL_CSV_HEADERS
+      taskSortModes:headers === FULL_CSV_HEADERS || headers === FULL_CSV_V4_HEADERS
         ? {
             good:settings.good_sort_mode,
             bad:settings.bad_sort_mode,
@@ -2739,6 +2954,7 @@ function countNewById(currentItems, importedItems){
 }
 function mergeAddCounts(clean){
   return {
+    taskSections: countNewById(taskSections, clean.taskSections),
     habits: countNewById(habits, clean.habits),
     bonusTasks: countNewById(bonusTasks, clean.bonusTasks),
     milestones: countNewById(milestones, clean.milestones),
@@ -2755,6 +2971,7 @@ function mergeImportedState(clean){
     revision:Math.max(stateRevision, clean.revision || 0),
     writerId:CLIENT_ID,
     data:{
+      taskSections:unionById(taskSections, clean.taskSections),
       habits:unionById(habits, clean.habits),
       bonusTasks:unionById(bonusTasks, clean.bonusTasks),
       milestones:unionById(milestones, clean.milestones),
@@ -2773,13 +2990,14 @@ function mergeImportedState(clean){
 async function mergeValidatedBackup(clean, formatLabel){
   const label = formatLabel || 'backup';
   const adds = mergeAddCounts(clean);
-  const total = adds.entries + adds.habits + adds.bonusTasks + adds.milestones + adds.completedDays;
+  const total = adds.entries + adds.habits + adds.bonusTasks + adds.taskSections + adds.milestones + adds.completedDays;
   if(total === 0){
     setBackupStatus(`Nothing to merge — every item in that ${label} is already in your ledger.`, 'success');
     return;
   }
   const parts = [
     `${adds.entries} logged entr${adds.entries === 1 ? 'y' : 'ies'}`,
+    `${adds.taskSections} custom section${adds.taskSections === 1 ? '' : 's'}`,
     `${adds.habits} habit${adds.habits === 1 ? '' : 's'}`,
     `${adds.bonusTasks} bonus entr${adds.bonusTasks === 1 ? 'y' : 'ies'}`,
     `${adds.milestones} milestone${adds.milestones === 1 ? '' : 's'}`,
@@ -2847,7 +3065,7 @@ async function clearLedgerData(){
       showSaveWarning();
       return;
     }
-    habits = []; bonusTasks = []; milestones = []; completedDays = []; entries = [];
+    habits = []; bonusTasks = []; taskSections = []; milestones = []; completedDays = []; entries = [];
     await persistData();
     renderAll();
   }
@@ -3042,18 +3260,39 @@ function renderHeader(didLog){
   }
 }
 
+function renderTaskGroups(kind, rowRenderer){
+  const customSections = sectionsForKind(kind);
+  if(customSections.length === 0){
+    return `<div class="task-group-list plain" data-task-drop-zone data-kind="${kind}" data-section-id="">${sortedTaskItems(kind, null).map(rowRenderer).join('')}</div>`;
+  }
+  const groups = [
+    { id:null, name:'Unsectioned', editable:false },
+    ...customSections.map(section => ({ ...section, editable:true }))
+  ];
+  return groups.map(group => {
+    const list = sortedTaskItems(kind, group.id);
+    const sectionId = group.id || '';
+    return `<div class="task-group" data-task-group data-kind="${kind}" data-section-id="${escapeHtml(sectionId)}">
+      <div class="task-group-head">
+        <span class="task-group-name">${escapeHtml(group.name)}</span>
+        ${group.editable ? `<button type="button" class="task-group-edit" data-action="open-task-section" data-kind="${kind}" data-id="${escapeHtml(group.id)}" aria-label="Edit ${escapeHtml(group.name)} section">✎</button>` : ''}
+      </div>
+      <div class="task-group-list" data-task-drop-zone data-kind="${kind}" data-section-id="${escapeHtml(sectionId)}">
+        ${list.length ? list.map(rowRenderer).join('') : '<div class="task-group-empty">Drag entries here</div>'}
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function renderHabitList(type, elId, emptyLead, emptyRest, addType){
   const el = document.getElementById(elId);
-  const list = sortedTaskItems(type);
-
-  if(list.length === 0){
+  if(taskItems(type).length === 0 && sectionsForKind(type).length === 0){
     el.innerHTML = `<div class="empty">${emptyLead} <button type="button" data-action="open-habit" data-type="${addType}">${emptyRest}</button></div>`;
     return;
   }
-
   const date = activeLedgerDate();
   const countLabel = date === todayKey() ? 'today' : 'this day';
-  el.innerHTML = list.map((h, index) => {
+  el.innerHTML = renderTaskGroups(type, h => {
     const confirmedStreak = habitStreakThroughDate(h, date);
     const todaysCount = entries.filter(e => e.date === date && taskMatchesEntry(type, h, e)).length;
     let sub = '';
@@ -3071,40 +3310,39 @@ function renderHabitList(type, elId, emptyLead, emptyRest, addType){
     const pillClass = type === 'good' ? '' : 'loss';
 
     return `
-      <div class="row">
+      <div class="row task-row" data-task-row data-kind="${type}" data-id="${escapeHtml(h.id)}" data-section-id="${escapeHtml(h.sectionId || '')}">
         <button type="button" class="row-main" style="background:none;border:none;text-align:left;padding:0;color:inherit" data-action="log-habit" data-id="${escapeHtml(h.id)}">
           <div class="row-name">${escapeHtml(h.name)}</div>
           ${sub ? `<div class="row-sub mono">${sub}</div>` : ''}
         </button>
-        ${taskOrderControls(type, h, index, list.length)}
         <button type="button" class="pill ${pillClass} mono" data-action="log-habit" data-id="${escapeHtml(h.id)}">${sign}${displayPts}</button>
         <button type="button" class="edit-btn" data-action="open-habit" data-type="${type}" data-id="${escapeHtml(h.id)}" aria-label="Edit ${escapeHtml(h.name)}">✎</button>
+        ${taskDragHandle(type, h)}
       </div>`;
-  }).join('');
+  });
 }
 
 function renderBonusList(){
   const el = document.getElementById('bonusList');
-  const list = sortedTaskItems('bonus');
-  if(list.length === 0){
+  if(bonusTasks.length === 0 && sectionsForKind('bonus').length === 0){
     el.innerHTML = `<div class="empty">No bonus entries yet — <button type="button" data-action="open-bonus">add a one-off you want to reward.</button></div>`;
     return;
   }
   const date = activeLedgerDate();
   const countLabel = date === todayKey() ? 'today' : 'this day';
-  el.innerHTML = list.map((b, index) => {
+  el.innerHTML = renderTaskGroups('bonus', b => {
     const todaysCount = entries.filter(e => e.date === date && taskMatchesEntry('bonus', b, e)).length;
     return `
-      <div class="row">
+      <div class="row task-row" data-task-row data-kind="bonus" data-id="${escapeHtml(b.id)}" data-section-id="${escapeHtml(b.sectionId || '')}">
         <button type="button" class="row-main" style="background:none;border:none;text-align:left;padding:0;color:inherit" data-action="log-bonus" data-id="${escapeHtml(b.id)}">
           <div class="row-name">✦ ${escapeHtml(b.name)}</div>
           ${todaysCount > 0 ? `<div class="row-sub mono">${todaysCount}× ${countLabel}</div>` : ''}
         </button>
-        ${taskOrderControls('bonus', b, index, list.length)}
         <button type="button" class="pill bonus mono" data-action="log-bonus" data-id="${escapeHtml(b.id)}">+${b.points}</button>
         <button type="button" class="edit-btn" data-action="open-bonus" data-id="${escapeHtml(b.id)}" aria-label="Edit ${escapeHtml(b.name)}">✎</button>
+        ${taskDragHandle('bonus', b)}
       </div>`;
-  }).join('');
+  });
 }
 
 function renderMilestoneList(){
@@ -3958,7 +4196,136 @@ function renderActivityLog(){
   }).join('');
 }
 
+/* ================= task drag handles ================= */
+let taskDragState = null;
+function clearTaskDropIndicators(){
+  document.querySelectorAll('.drop-before,.drop-after,.drop-target').forEach(element => {
+    element.classList.remove('drop-before','drop-after','drop-target');
+  });
+}
+function cleanupTaskDrag(){
+  if(!taskDragState) return;
+  taskDragState.row?.classList.remove('drag-source');
+  taskDragState.ghost?.remove();
+  clearTaskDropIndicators();
+  document.body.classList.remove('task-dragging');
+  taskDragState = null;
+}
+function beginTaskDrag(event, handle){
+  const kind = handle.dataset.kind;
+  const id = handle.dataset.id;
+  if(!['good','bad','bonus'].includes(kind) || !id) return;
+  if(taskSortModes[kind] !== 'manual'){
+    event.preventDefault();
+    taskSortModes[kind] = 'manual';
+    persistSettings();
+    renderAll();
+    setReorderStatus(`${taskKindLabel(kind)} switched to Manual sorting. Drag the handle again to move this entry.`);
+    return;
+  }
+  const row = handle.closest('[data-task-row]');
+  if(!row) return;
+  event.preventDefault();
+  try{ handle.setPointerCapture(event.pointerId); }catch(e){}
+  taskDragState = {
+    pointerId:event.pointerId,
+    kind,
+    id,
+    row,
+    startX:event.clientX,
+    startY:event.clientY,
+    active:false,
+    targetSectionId:null,
+    beforeId:null,
+    hasTarget:false,
+    ghost:null
+  };
+}
+function updateTaskDrag(event){
+  const state = taskDragState;
+  if(!state || event.pointerId !== state.pointerId) return;
+  const distance = Math.hypot(event.clientX - state.startX, event.clientY - state.startY);
+  if(!state.active && distance < 4) return;
+  if(!state.active){
+    state.active = true;
+    state.row.classList.add('drag-source');
+    document.body.classList.add('task-dragging');
+    const task = taskItems(state.kind).find(item => item.id === state.id);
+    const ghost = document.createElement('div');
+    ghost.className = 'task-drag-ghost';
+    ghost.textContent = task?.name || 'Move entry';
+    document.body.appendChild(ghost);
+    state.ghost = ghost;
+  }
+  event.preventDefault();
+  state.ghost.style.left = `${event.clientX}px`;
+  state.ghost.style.top = `${event.clientY}px`;
+  clearTaskDropIndicators();
+  state.hasTarget = false;
+
+  const underPointer = document.elementFromPoint ? document.elementFromPoint(event.clientX, event.clientY) : null;
+  const zone = underPointer?.closest?.(`[data-task-drop-zone][data-kind="${state.kind}"]`);
+  if(zone){
+    const rows = [...zone.querySelectorAll(`[data-task-row][data-kind="${state.kind}"]`)]
+      .filter(row => row.dataset.id !== state.id);
+    let beforeId = null;
+    let marker = null;
+    for(const row of rows){
+      const rect = row.getBoundingClientRect();
+      if(event.clientY < rect.top + rect.height / 2){
+        beforeId = row.dataset.id;
+        marker = row;
+        break;
+      }
+    }
+    if(marker) marker.classList.add('drop-before');
+    else if(rows.length) rows[rows.length - 1].classList.add('drop-after');
+    else zone.classList.add('drop-target');
+    state.targetSectionId = sectionIdValue(zone.dataset.sectionId);
+    state.beforeId = beforeId;
+    state.hasTarget = true;
+  }
+  if(typeof window.scrollBy === 'function'){
+    if(event.clientY < 72) window.scrollBy({ top:-10, behavior:'auto' });
+    else if(event.clientY > window.innerHeight - 88) window.scrollBy({ top:10, behavior:'auto' });
+  }
+}
+function finishTaskDrag(event){
+  const state = taskDragState;
+  if(!state || event.pointerId !== state.pointerId) return;
+  const shouldMove = state.active && state.hasTarget;
+  const { kind, id, targetSectionId, beforeId } = state;
+  cleanupTaskDrag();
+  if(shouldMove) moveTaskToPosition(kind, id, targetSectionId, beforeId);
+}
+
 /* ================= interaction wiring ================= */
+document.addEventListener('pointerdown', event => {
+  const handle = event.target.closest('[data-drag-handle]');
+  if(handle) beginTaskDrag(event, handle);
+});
+document.addEventListener('pointermove', updateTaskDrag, { passive:false });
+document.addEventListener('pointerup', finishTaskDrag);
+document.addEventListener('pointercancel', cleanupTaskDrag);
+document.addEventListener('keydown', event => {
+  const handle = event.target.closest?.('[data-drag-handle]');
+  if(!handle) return;
+  const kind = handle.dataset.kind;
+  const id = handle.dataset.id;
+  if(taskSortModes[kind] !== 'manual' && (event.key === 'Enter' || event.key === ' ')){
+    event.preventDefault();
+    setTaskSortMode(kind, 'manual');
+    setReorderStatus(`${taskKindLabel(kind)} switched to Manual sorting.`);
+    return;
+  }
+  if(!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+  event.preventDefault();
+  if(moveTaskByKeyboard(kind, id, event.key)){
+    setTimeout(() => {
+      document.querySelector(`[data-drag-handle][data-kind="${kind}"][data-id="${id}"]`)?.focus();
+    }, 0);
+  }
+});
 document.addEventListener('click', event => {
   const target = event.target.closest('[data-action]');
   if(!target) return;
@@ -3969,7 +4336,10 @@ document.addEventListener('click', event => {
     case 'toggle-activity': toggleActivityLog(); break;
     case 'navigate-today': navigateToday(target.dataset.offset); break;
     case 'return-today': returnToToday(); break;
-    case 'move-task': moveTask(target.dataset.kind, id, target.dataset.direction); break;
+    case 'open-task-section': openTaskSectionModal(target.dataset.kind, id); break;
+    case 'close-task-section': closeTaskSectionModal(); break;
+    case 'save-task-section': saveTaskSection(); break;
+    case 'delete-task-section': deleteTaskSectionConfirm(); break;
     case 'open-habit': openHabitModal(target.dataset.type || 'good', id); break;
     case 'close-habit': closeHabitModal(); break;
     case 'set-habit-type': setHabitType(target.dataset.type); break;
@@ -4074,6 +4444,7 @@ document.getElementById('csvRestoreFileInput').addEventListener('change', async 
 });
 ['habitName','habitPoints'].forEach(id => document.getElementById(id).addEventListener('input', () => clearFieldError('habitError')));
 ['bonusName','bonusPoints'].forEach(id => document.getElementById(id).addEventListener('input', () => clearFieldError('bonusError')));
+document.getElementById('taskSectionName').addEventListener('input', () => clearFieldError('taskSectionError'));
 ['milestoneName','milestoneDays','milestonePoints','milestoneDescription'].forEach(id =>
   document.getElementById(id).addEventListener('input', () => clearFieldError('milestoneError'))
 );
@@ -4110,6 +4481,7 @@ document.addEventListener('keydown', event => {
     if(top.id === 'confirmOverlay') resolveConfirm(false);
     else if(top.id === 'habitOverlay') closeHabitModal();
     else if(top.id === 'bonusOverlay') closeBonusModal();
+    else if(top.id === 'taskSectionOverlay') closeTaskSectionModal();
     else if(top.id === 'milestoneOverlay') closeMilestoneModal();
     else if(top.id === 'settingsOverlay') closeSettings();
     else if(top.id === 'backupOverlay') closeBackup();

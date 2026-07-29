@@ -92,8 +92,11 @@ is informational only; automatic milestone rewards remain the configurable way t
 award longer-term consistency.
 
 On the Today tab, use the date navigator to backfill an earlier tracked day
-directly with the same credit, debit, and bonus buttons. Each task section can be
-sorted manually, alphabetically, by usage, or by point value. Manual order and sort
+directly with the same credit, debit, and bonus buttons. Credits, debits, and
+bonus entries can each be divided into named custom sections. In Manual mode,
+use the six-dot handle to reorder an entry or drag it into another section of
+the same type. Automatic alphabetical, usage, and point-value sorting remains
+available within each section. Groups, task assignments, manual order, and sort
 preferences sync across devices and are included in complete JSON/CSV backups.
 
 ## Updating

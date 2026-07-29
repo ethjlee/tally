@@ -99,6 +99,7 @@
           <span class="section-actions">
             <label class="sr-only" for="goodSortSelect">Sort credits</label>
             <select class="sort-select" id="goodSortSelect" data-sort-kind="good" aria-label="Sort credits"></select>
+            <button type="button" class="add-link section-link" data-action="open-task-section" data-kind="good">+ Section</button>
             <button type="button" class="add-link" data-action="open-habit" data-type="good">+ Add credit</button>
           </span>
         </div>
@@ -111,6 +112,7 @@
           <span class="section-actions">
             <label class="sr-only" for="badSortSelect">Sort debits</label>
             <select class="sort-select" id="badSortSelect" data-sort-kind="bad" aria-label="Sort debits"></select>
+            <button type="button" class="add-link section-link loss-tone" data-action="open-task-section" data-kind="bad">+ Section</button>
             <button type="button" class="add-link loss-tone" data-action="open-habit" data-type="bad">+ Add debit</button>
           </span>
         </div>
@@ -123,6 +125,7 @@
           <span class="section-actions">
             <label class="sr-only" for="bonusSortSelect">Sort bonus entries</label>
             <select class="sort-select" id="bonusSortSelect" data-sort-kind="bonus" aria-label="Sort bonus entries"></select>
+            <button type="button" class="add-link section-link bonus-tone" data-action="open-task-section" data-kind="bonus">+ Section</button>
             <button type="button" class="add-link bonus-tone" data-action="open-bonus">+ Add bonus</button>
           </span>
         </div>
@@ -137,6 +140,7 @@
         <div class="section-help">Awarded automatically when you reach the target number of successful tracked days in a row. Untracked days pause the streak; a tracked day below your success threshold resets it. Changes recalculate past awards immediately.</div>
         <div id="milestoneList"></div>
       </section>
+      <div class="sr-only" id="reorderStatus" aria-live="polite"></div>
     </div>
 
     <div class="view" id="insightsView" data-view="insights">
@@ -229,7 +233,7 @@
         <div class="manage-card">
           <div class="storage-detail" id="resetPreviewEl" aria-live="polite"></div>
           <button type="button" class="manage-row danger" data-action="clear-ledger">
-            <span class="manage-copy"><span class="manage-title">Clear ledger &amp; milestones</span><span class="manage-sub">Removes habits, bonus entries, milestones, completed-day marks, and logged activity. Settings stay unchanged.</span></span>
+            <span class="manage-copy"><span class="manage-title">Clear ledger &amp; milestones</span><span class="manage-sub">Removes custom sections, habits, bonus entries, milestones, completed-day marks, and logged activity. Settings stay unchanged.</span></span>
           </button>
           <button type="button" class="manage-row danger" data-action="reset-settings">
             <span class="manage-copy"><span class="manage-title">Reset settings</span><span class="manage-sub">Returns scoring, start date, day boundary, and chart range to defaults.</span></span>
@@ -273,6 +277,11 @@
       <input id="habitPoints" type="number" inputmode="numeric" min="1" max="999" placeholder="10">
       <div class="hint" id="habitHint">Credits always award their configured points. Credit streaks are informational and never change the award.</div>
       <div class="field-error" id="habitError" role="alert"></div>
+    </div>
+    <div class="field">
+      <label for="habitSectionInput">Section</label>
+      <select id="habitSectionInput"></select>
+      <div class="hint">Optional. You can also drag this entry between sections while using Manual sorting.</div>
     </div>
     <div class="modal-actions">
       <button type="button" class="btn danger" id="deleteHabitBtn" style="display:none" data-action="delete-habit">Delete</button>
@@ -340,10 +349,33 @@
       <div class="hint">Tap it any time you earn it — no streak, just a one-off award. Log it as many times as it happens.</div>
       <div class="field-error" id="bonusError" role="alert"></div>
     </div>
+    <div class="field">
+      <label for="bonusSectionInput">Section</label>
+      <select id="bonusSectionInput"></select>
+      <div class="hint">Optional. You can also drag this entry between sections while using Manual sorting.</div>
+    </div>
     <div class="modal-actions">
       <button type="button" class="btn danger" id="deleteBonusBtn" style="display:none" data-action="delete-bonus">Delete</button>
       <button type="button" class="btn ghost" data-action="close-bonus">Cancel</button>
       <button type="button" class="btn primary" data-action="save-bonus">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Task section modal -->
+<div class="overlay" id="taskSectionOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="taskSectionModalTitle">
+    <h2 id="taskSectionModalTitle">Add section</h2>
+    <div class="field">
+      <label for="taskSectionName">Section name</label>
+      <input id="taskSectionName" type="text" maxlength="40" placeholder="e.g. Morning routine">
+      <div class="hint" id="taskSectionKindHint"></div>
+      <div class="field-error" id="taskSectionError" role="alert"></div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn danger" id="deleteTaskSectionBtn" style="display:none" data-action="delete-task-section">Delete</button>
+      <button type="button" class="btn ghost" data-action="close-task-section">Cancel</button>
+      <button type="button" class="btn primary" data-action="save-task-section">Save</button>
     </div>
   </div>
 </div>
@@ -404,7 +436,7 @@
     </div>
     <div class="field backup-format">
       <span class="backup-format-title">Complete CSV backup</span>
-      <div class="hint">A restorable CSV containing settings, habits, bonus definitions, milestones, completed-day marks, and every logged entry. Automatic awards are regenerated from those source records. The separate activity CSV remains optimized for spreadsheets.</div>
+      <div class="hint">A restorable CSV containing settings, custom sections, habits, bonus definitions, milestones, completed-day marks, and every logged entry. Automatic awards are regenerated from those source records. The separate activity CSV remains optimized for spreadsheets.</div>
       <div class="backup-tools">
         <button type="button" class="btn ghost" data-action="download-csv-backup">Save CSV</button>
         <label class="file-picker">Choose CSV<input id="csvRestoreFileInput" type="file" accept=".csv,text/csv"></label>

@@ -5,11 +5,19 @@ import { parseSnapshot, syncPutSchema } from "../lib/snapshot";
 function validSnapshot() {
   return {
     app: "Tally" as const,
-    schemaVersion: 4 as const,
+    schemaVersion: 5 as const,
     savedAt: "2026-07-29T12:00:00.000Z",
     revision: 4,
     writerId: "device_1",
     data: {
+      taskSections: [
+        {
+          id: "section_1",
+          name: "Daily wear",
+          kind: "good" as const,
+          order: 0
+        }
+      ],
       habits: [
         {
           id: "habit_1",
@@ -18,7 +26,8 @@ function validSnapshot() {
           points: 10,
           streak: 2,
           lastDate: "2026-07-29",
-          order: 0
+          order: 0,
+          sectionId: "section_1"
         }
       ],
       bonusTasks: [],
@@ -65,27 +74,36 @@ function validSnapshot() {
 
 test("server accepts the complete current ledger schema", () => {
   const parsed = parseSnapshot(validSnapshot());
-  assert.equal(parsed.schemaVersion, 4);
-  if (parsed.schemaVersion !== 4) throw new Error("Expected current schema");
+  assert.equal(parsed.schemaVersion, 5);
+  if (parsed.schemaVersion !== 5) throw new Error("Expected current schema");
   assert.equal(parsed.settings.backupReminderDays, 14);
   assert.equal(parsed.settings.taskSortModes.bad, "usage-desc");
   assert.equal(parsed.data.habits[0].order, 0);
+  assert.equal(parsed.data.habits[0].sectionId, "section_1");
+  assert.equal(parsed.data.taskSections[0].kind, "good");
   assert.equal(parsed.data.milestones.length, 1);
 });
 
-test("server accepts the deployed version-3 cloud snapshot during rolling upgrade", () => {
-  const legacy: any = structuredClone(validSnapshot());
-  legacy.schemaVersion = 3;
-  delete legacy.settings.taskSortModes;
-  legacy.data.habits.forEach((item: any) => delete item.order);
-  legacy.data.bonusTasks.forEach((item: any) => delete item.order);
-  const parsed = parseSnapshot(legacy);
+test("server accepts deployed version-4 and version-3 snapshots during rolling upgrade", () => {
+  const legacyV4: any = structuredClone(validSnapshot());
+  legacyV4.schemaVersion = 4;
+  delete legacyV4.data.taskSections;
+  legacyV4.data.habits.forEach((item: any) => delete item.sectionId);
+  legacyV4.data.bonusTasks.forEach((item: any) => delete item.sectionId);
+  assert.equal(parseSnapshot(legacyV4).schemaVersion, 4);
+
+  const legacyV3: any = structuredClone(legacyV4);
+  legacyV3.schemaVersion = 3;
+  delete legacyV3.settings.taskSortModes;
+  legacyV3.data.habits.forEach((item: any) => delete item.order);
+  legacyV3.data.bonusTasks.forEach((item: any) => delete item.order);
+  const parsed = parseSnapshot(legacyV3);
   assert.equal(parsed.schemaVersion, 3);
 
   const put = syncPutSchema.parse({
     baseRevision: 4,
     operationId: "legacy_device_write",
-    snapshot: legacy
+    snapshot: legacyV3
   });
   assert.equal(put.snapshot.schemaVersion, 3);
 });
@@ -119,6 +137,10 @@ test("server rejects wrong point signs and unknown fields", () => {
   const invalidSort: any = validSnapshot();
   invalidSort.settings.taskSortModes.good = "random";
   assert.throws(() => parseSnapshot(invalidSort));
+
+  const incompatibleSection: any = validSnapshot();
+  incompatibleSection.data.taskSections[0].kind = "bad";
+  assert.throws(() => parseSnapshot(incompatibleSection));
 });
 
 test("server validates optimistic revision and operation ID", () => {
