@@ -74,9 +74,19 @@
   <main>
 
     <div class="view active" id="todayView" data-view="today">
+      <div class="ledger-navigator" aria-label="Choose the ledger day shown on this page">
+        <button type="button" class="ledger-nav-button" id="todayPrevBtn" data-action="navigate-today" data-offset="-1" aria-label="Previous day">‹</button>
+        <label class="ledger-date-control" for="todayDateInput">
+          <span id="todayDateCaption">Today</span>
+          <input id="todayDateInput" type="date" aria-label="Ledger date">
+        </label>
+        <button type="button" class="ledger-nav-button" id="todayNextBtn" data-action="navigate-today" data-offset="1" aria-label="Next day">›</button>
+        <button type="button" class="ledger-today-button" id="returnTodayBtn" data-action="return-today">Today</button>
+      </div>
+
       <section class="section">
         <div class="section-head">
-          <span class="section-title">Today's activity</span>
+          <span class="section-title" id="activitySectionTitle">Today's activity</span>
           <button type="button" class="add-link" data-action="toggle-activity" id="activityToggleBtn">Show (0)</button>
         </div>
         <div id="todayCompletionControl"></div>
@@ -86,7 +96,11 @@
       <section class="section">
         <div class="section-head">
           <span class="section-title">Credits</span>
-          <button type="button" class="add-link" data-action="open-habit" data-type="good">+ Add credit</button>
+          <span class="section-actions">
+            <label class="sr-only" for="goodSortSelect">Sort credits</label>
+            <select class="sort-select" id="goodSortSelect" data-sort-kind="good" aria-label="Sort credits"></select>
+            <button type="button" class="add-link" data-action="open-habit" data-type="good">+ Add credit</button>
+          </span>
         </div>
         <div id="goodList"></div>
       </section>
@@ -94,7 +108,11 @@
       <section class="section">
         <div class="section-head">
           <span class="section-title">Debits</span>
-          <button type="button" class="add-link loss-tone" data-action="open-habit" data-type="bad">+ Add debit</button>
+          <span class="section-actions">
+            <label class="sr-only" for="badSortSelect">Sort debits</label>
+            <select class="sort-select" id="badSortSelect" data-sort-kind="bad" aria-label="Sort debits"></select>
+            <button type="button" class="add-link loss-tone" data-action="open-habit" data-type="bad">+ Add debit</button>
+          </span>
         </div>
         <div id="badList"></div>
       </section>
@@ -102,7 +120,11 @@
       <section class="section">
         <div class="section-head">
           <span class="section-title">Bonus entries</span>
-          <button type="button" class="add-link bonus-tone" data-action="open-bonus">+ Add bonus</button>
+          <span class="section-actions">
+            <label class="sr-only" for="bonusSortSelect">Sort bonus entries</label>
+            <select class="sort-select" id="bonusSortSelect" data-sort-kind="bonus" aria-label="Sort bonus entries"></select>
+            <button type="button" class="add-link bonus-tone" data-action="open-bonus">+ Add bonus</button>
+          </span>
         </div>
         <div id="bonusList"></div>
       </section>
@@ -249,7 +271,7 @@
     <div class="field">
       <label id="pointsLabel" for="habitPoints">Points</label>
       <input id="habitPoints" type="number" inputmode="numeric" min="1" max="999" placeholder="10">
-      <div class="hint" id="habitHint">Credits scale up the longer your streak runs — up to 2× at a 21-day streak.</div>
+      <div class="hint" id="habitHint">Credits always award their configured points. Credit streaks are informational and never change the award.</div>
       <div class="field-error" id="habitError" role="alert"></div>
     </div>
     <div class="modal-actions">

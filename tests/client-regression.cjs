@@ -134,6 +134,8 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
       milestones = payload.milestones;
       habits = [];
       bonusTasks = [];
+      taskSortModes = { good:'manual', bad:'manual', bonus:'manual' };
+      todayViewDate = todayKey();
       recomputeAllHabitStreaks();
     }
   `);
@@ -150,6 +152,95 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   const d1 = window.addDaysToKey(today, -2);
   const d2 = window.addDaysToKey(today, -1);
   const d3 = today;
+
+  window.eval(`
+    trackingStartDate = addDaysToKey('${today}', -20);
+    entries = Array.from({ length:20 }, (_, index) => {
+      const date = addDaysToKey('${today}', index - 20);
+      return {
+        id:'fixed_history_' + index, date, name:'Fixed credit', type:'good',
+        points:10, ts:index + 1, habitId:'fixed_credit'
+      };
+    });
+    completedDays = [];
+    milestones = [];
+    bonusTasks = [];
+    habits = [
+      { id:'fixed_credit', name:'Fixed credit', type:'good', points:10, streak:20, lastDate:'${d2}' },
+      { id:'fixed_debit', name:'Fixed debit', type:'bad', points:7, streak:0, lastDate:null }
+    ];
+    renderAll();
+  `);
+  window.logHabit('fixed_credit');
+  eq(window.eval(`entries.find(entry => entry.habitId === 'fixed_credit').points`), 10, 'A long credit streak still awards configured points');
+  eq(window.eval(`habits.find(habit => habit.id === 'fixed_credit').streak`), 21, 'Credit habit streak remains informational');
+  window.logHabit('fixed_credit');
+  eq(window.eval(`entries.filter(entry => entry.habitId === 'fixed_credit').every(entry => entry.points === 10)`), true, 'Repeated same-day credit taps remain fixed');
+  window.logHabit('fixed_debit');
+  eq(window.eval(`entries.find(entry => entry.habitId === 'fixed_debit').points`), -7, 'Debit points remain fixed and negative');
+  ok(window.document.getElementById('goodList').textContent.includes('🔥 21-day streak'), 'Informational habit streak remains visible');
+  ok(!/·\s*×\d+\.\d+/.test(window.document.getElementById('goodList').textContent), 'Multiplier label is absent from the habit UI');
+  eq(window.document.querySelector('#goodList .pill').textContent, '+10', 'Credit pill shows configured points');
+
+  window.eval(`
+    trackingStartDate = '${d1}';
+    todayViewDate = '${today}';
+    habits = [
+      { id:'sort_z', name:'Zulu', type:'good', points:30, streak:0, lastDate:null, order:0 },
+      { id:'sort_a', name:'Alpha', type:'good', points:10, streak:0, lastDate:null, order:1 },
+      { id:'sort_m', name:'Mike', type:'good', points:20, streak:0, lastDate:null, order:2 }
+    ];
+    bonusTasks = [
+      { id:'bonus_z', name:'Zulu bonus', points:9, order:0 },
+      { id:'bonus_a', name:'Alpha bonus', points:3, order:1 }
+    ];
+    entries = [
+      { id:'use_1', date:'${d1}', name:'Mike', type:'good', points:20, ts:1, habitId:'sort_m' },
+      { id:'use_2', date:'${d2}', name:'Mike', type:'good', points:20, ts:2, habitId:'sort_m' },
+      { id:'use_3', date:'${d2}', name:'Alpha', type:'good', points:10, ts:3, habitId:'sort_a' }
+    ];
+    completedDays = [];
+    milestones = [];
+    taskSortModes = { good:'manual', bad:'manual', bonus:'manual' };
+    renderAll();
+  `);
+  const visibleCreditNames = () => [...window.document.querySelectorAll('#goodList .row-name')].map(node => node.textContent);
+  eq(JSON.stringify(visibleCreditNames()), JSON.stringify(['Zulu','Alpha','Mike']), 'Manual sorting preserves explicit task order');
+  window.setTaskSortMode('good', 'name-asc');
+  eq(JSON.stringify(visibleCreditNames()), JSON.stringify(['Alpha','Mike','Zulu']), 'A-to-Z task sorting works');
+  window.setTaskSortMode('good', 'usage-desc');
+  eq(JSON.stringify(visibleCreditNames()), JSON.stringify(['Mike','Alpha','Zulu']), 'Most-used task sorting uses linked history');
+  window.setTaskSortMode('good', 'manual');
+  window.moveTask('good', 'sort_z', '1');
+  eq(JSON.stringify(visibleCreditNames()), JSON.stringify(['Alpha','Zulu','Mike']), 'Manual move changes and rerenders stored task order');
+  window.setTaskSortMode('bonus', 'points-asc');
+  eq(window.document.querySelector('#bonusList .row-name').textContent, '✦ Alpha bonus', 'Point-value sorting works for bonus entries');
+  const sortedJsonBackup = window.validateBackupObject(JSON.parse(JSON.stringify(window.buildExport())));
+  eq(sortedJsonBackup.taskSortModes.bonus, 'points-asc', 'JSON backup preserves selected task sort modes');
+  eq(sortedJsonBackup.habits.find(item => item.id === 'sort_z').order, 1, 'JSON backup preserves manual task order');
+  const sortedCsvBackup = window.parseFullCsvBackup(window.buildFullCsvBackup().text);
+  eq(sortedCsvBackup.taskSortModes.bonus, 'points-asc', 'Complete CSV preserves selected task sort modes');
+  eq(sortedCsvBackup.habits.find(item => item.id === 'sort_z').order, 1, 'Complete CSV preserves manual task order');
+  const legacyJsonBackup = JSON.parse(JSON.stringify(window.buildExport()));
+  legacyJsonBackup.schemaVersion = 3;
+  delete legacyJsonBackup.settings.taskSortModes;
+  legacyJsonBackup.data.habits.forEach(item => delete item.order);
+  legacyJsonBackup.data.bonusTasks.forEach(item => delete item.order);
+  const migratedLegacyJson = window.validateBackupObject(legacyJsonBackup);
+  eq(migratedLegacyJson.taskSortModes.good, 'manual', 'Version-3 JSON migrates to manual sorting');
+  eq(migratedLegacyJson.habits.find(item => item.id === 'sort_z').order, 0, 'Version-3 JSON migrates visible array order');
+
+  window.eval(`todayViewDate = '${d2}'; taskSortModes.good = 'manual'; renderAll();`);
+  window.logHabit('sort_a');
+  window.logBonus('bonus_a');
+  eq(window.eval(`entries.filter(entry => entry.date === '${d2}' && entry.habitId === 'sort_a').length`), 2, 'Front-page credit tap targets selected historical day');
+  eq(window.eval(`entries.filter(entry => entry.date === '${d2}' && entry.bonusId === 'bonus_a').length`), 1, 'Front-page bonus tap targets selected historical day');
+  eq(window.document.getElementById('todayDateCaption').textContent, 'Yesterday', 'Front-page navigator labels yesterday clearly');
+  ok(window.document.getElementById('statusEl').textContent.includes('on this day'), 'Header score identifies a historical ledger day');
+  ok(window.document.getElementById('goodList').textContent.includes('2× this day'), 'Task count follows selected historical day');
+  window.returnToToday();
+  eq(window.document.getElementById('todayDateInput').value, today, 'Today shortcut returns front page to current ledger day');
+
   setLedger({
     start: d1,
     entries: [
@@ -234,10 +325,12 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   const cleanJson = window.validateBackupObject(JSON.parse(JSON.stringify(exportObject)));
   eq(cleanJson.entries.length, 2, 'JSON backup round-trip preserves entries');
   eq(cleanJson.milestones.length, 1, 'JSON backup round-trip preserves milestones');
+  eq(cleanJson.taskSortModes.good, 'manual', 'JSON backup round-trip preserves task sorting');
   const csv = window.buildFullCsvBackup().text;
   const cleanCsv = window.parseFullCsvBackup(csv);
   eq(cleanCsv.entries.length, 2, 'CSV backup round-trip preserves entries');
   eq(cleanCsv.milestones.length, 1, 'CSV backup round-trip preserves milestones');
+  eq(cleanCsv.taskSortModes.good, 'manual', 'CSV backup round-trip preserves task sorting');
 
   window.eval(`backupReminderDays = 0`);
   const csvNoReminder = window.parseFullCsvBackup(window.buildFullCsvBackup().text);
@@ -246,11 +339,23 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   const csvTwoWeeks = window.parseFullCsvBackup(window.buildFullCsvBackup().text);
   eq(csvTwoWeeks.backupReminderDays, 14, 'CSV backup preserves enabled reminder frequency');
 
-  const legacyRows = window.parseCsvRows(window.buildFullCsvBackup().text);
-  const reminderColumn = legacyRows[0].indexOf('backup_reminder_days');
-  legacyRows.forEach(row => row.splice(reminderColumn, 1));
-  legacyRows[1][legacyRows[0].indexOf('format_version')] = '2';
-  const legacyCsv = legacyRows
+  const legacyV3Rows = window.parseCsvRows(window.buildFullCsvBackup().text);
+  ['manual_order','bonus_sort_mode','bad_sort_mode','good_sort_mode'].forEach(column => {
+    const index = legacyV3Rows[0].indexOf(column);
+    legacyV3Rows.forEach(row => row.splice(index, 1));
+  });
+  legacyV3Rows[1][legacyV3Rows[0].indexOf('format_version')] = '3';
+  const legacyV3Csv = legacyV3Rows
+    .map(row => row.map(value => window.csvCell(value, false)).join(','))
+    .join('\r\n') + '\r\n';
+  eq(window.parseFullCsvBackup(legacyV3Csv).backupReminderDays, 14, 'Legacy version-3 CSV preserves its reminder setting');
+  eq(window.parseFullCsvBackup(legacyV3Csv).taskSortModes.good, 'manual', 'Legacy version-3 CSV defaults task sorting safely');
+
+  const legacyV2Rows = window.parseCsvRows(legacyV3Csv);
+  const reminderColumn = legacyV2Rows[0].indexOf('backup_reminder_days');
+  legacyV2Rows.forEach(row => row.splice(reminderColumn, 1));
+  legacyV2Rows[1][legacyV2Rows[0].indexOf('format_version')] = '2';
+  const legacyCsv = legacyV2Rows
     .map(row => row.map(value => window.csvCell(value, false)).join(','))
     .join('\r\n') + '\r\n';
   eq(window.parseFullCsvBackup(legacyCsv).backupReminderDays, 0, 'Legacy version-2 CSV remains importable with reminders safely off');
@@ -390,8 +495,18 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   ]);
   const cloudDate = cloudA.browser.window.todayKey();
   await Promise.all([
-    cloudA.browser.window.eval(`entries.push({id:'cloud_a',date:'${cloudDate}',name:'Cloud A',type:'good',points:1,ts:11});persistData()`),
-    cloudB.browser.window.eval(`entries.push({id:'cloud_b',date:'${cloudDate}',name:'Cloud B',type:'good',points:2,ts:12});persistData()`)
+    cloudA.browser.window.eval(`
+      entries.push({id:'cloud_a',date:'${cloudDate}',name:'Cloud A',type:'good',points:1,ts:11});
+      habits.push({id:'cloud_habit',name:'Cloud habit',type:'good',points:4,streak:0,lastDate:null,order:7});
+      taskSortModes.good = 'name-desc';
+      persistData()
+    `),
+    cloudB.browser.window.eval(`
+      entries.push({id:'cloud_b',date:'${cloudDate}',name:'Cloud B',type:'good',points:2,ts:12});
+      bonusTasks.push({id:'cloud_bonus',name:'Cloud bonus',points:5,order:3});
+      taskSortModes.bonus = 'points-asc';
+      persistData()
+    `)
   ]);
   await Promise.all([
     cloudA.browser.window.syncCloudNow(),
@@ -403,6 +518,10 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   await waitFor(() => cloudReader.browser.window.document.getElementById('loadingScreen').style.display === 'none');
   const cloudIds = cloudReader.browser.window.eval('entries.map(entry => entry.id).sort()');
   eq(JSON.stringify(cloudIds), JSON.stringify(['cloud_a', 'cloud_b']), 'Two separate devices merge independent cloud writes without lost data');
+  eq(cloudReader.browser.window.eval(`habits.find(item => item.id === 'cloud_habit').order`), 7, 'Cloud merge preserves explicit manual habit order');
+  eq(cloudReader.browser.window.eval(`bonusTasks.find(item => item.id === 'cloud_bonus').order`), 3, 'Cloud merge preserves explicit manual bonus order');
+  eq(cloudReader.browser.window.eval(`taskSortModes.good`), 'name-desc', 'Cloud merge preserves credit sort preference');
+  eq(cloudReader.browser.window.eval(`taskSortModes.bonus`), 'points-asc', 'Cloud merge preserves independent bonus sort preference');
   ok(sharedCloud.revision >= 3, 'Cloud revision advances monotonically through a write conflict');
   cloudA.browser.window.close();
   cloudB.browser.window.close();

@@ -1,6 +1,6 @@
 /* ================= state ================= */
-let habits = [];      // {id, name, type:'good'|'bad', points, streak, lastDate}
-let bonusTasks = [];  // {id, name, points}
+let habits = [];      // {id, name, type:'good'|'bad', points, streak, lastDate, order}
+let bonusTasks = [];  // {id, name, points, order}
 let entries = [];     // {id, date, name, type:'good'|'bad'|'bonus', points, ts}
 let milestones = [];  // {id, name, days, points, description}
 let completedDays = []; // {id, date, ts}; explicit no-entry day confirmations
@@ -11,6 +11,7 @@ let trackingStartDate = todayKey(); // first calendar day included in every stat
 let historyRangeDays = 14; // 7, 14, 30, 90, or 'all'
 let lastBackupAt = null; // ISO timestamp of the last completed restorable JSON or CSV backup
 let backupReminderDays = 7; // days between backup nudges; 0 = reminders off. Device-local cadence.
+let taskSortModes = { good:'manual', bad:'manual', bonus:'manual' };
 
 let storageAvailable = true;
 let editingHabitId = null;
@@ -26,6 +27,7 @@ let stateRevision = 0;
 let storageMode = 'memory';
 let tallyDb = null;
 let activeView = 'today';
+let todayViewDate = null;
 const CLIENT_ID = uid();
 let durableRevision = 0;
 let durableBaseSnapshot = null;
@@ -88,6 +90,13 @@ function statsStartKey(){
 function isInStatsWindow(date, end = todayKey()){
   return isValidDateKey(date) && date >= statsStartKey() && date <= end;
 }
+function activeLedgerDate(){
+  const start = statsStartKey();
+  const end = todayKey();
+  if(!isValidDateKey(todayViewDate) || todayViewDate < start) todayViewDate = start;
+  if(todayViewDate > end) todayViewDate = end;
+  return todayViewDate;
+}
 function inferredStartDate(candidateEntries, hour = dayStartHour){
   const end = ledgerDateKeyForHour(hour);
   const dates = candidateEntries.map(entry => entry.date).filter(date => isValidDateKey(date) && date <= end).sort();
@@ -95,25 +104,144 @@ function inferredStartDate(candidateEntries, hour = dayStartHour){
 }
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
-function streakMultiplier(streak){
-  return 1 + Math.min(0.05 * Math.max(streak - 1, 0), 1);
+function habitStreakThroughDate(habit, end){
+  const sameNameGoodHabits = habits.filter(h => h.type === 'good' && h.name === habit.name);
+  const dates = [...new Set(entries
+    .filter(entry => entry.type === 'good' && entry.date <= end && entry.date >= statsStartKey() && (
+      entry.habitId
+        ? entry.habitId === habit.id
+        : (sameNameGoodHabits.length === 1 && entry.name === habit.name)
+    ))
+    .map(entry => entry.date)
+  )].sort();
+  if(!dates.length) return 0;
+  const lastDate = dates[dates.length - 1];
+  if(lastDate !== end && lastDate !== addDaysToKey(end, -1)) return 0;
+  let streak = 1;
+  let cursor = lastDate;
+  for(let index = dates.length - 2; index >= 0; index--){
+    const previous = addDaysToKey(cursor, -1);
+    if(dates[index] !== previous) break;
+    streak++;
+    cursor = previous;
+  }
+  return streak;
 }
 
-function activeStreakDisplay(habit){
-  const today = todayKey();
-  const yest = addDaysToKey(today, -1);
-  if(habit.lastDate === today || habit.lastDate === yest) return habit.streak || 0;
-  return 0;
+const TASK_SORT_OPTIONS = [
+  ['manual','Manual'],
+  ['name-asc','A → Z'],
+  ['name-desc','Z → A'],
+  ['usage-desc','Most used'],
+  ['usage-asc','Least used'],
+  ['points-desc','Highest points'],
+  ['points-asc','Lowest points']
+];
+function taskItems(kind){
+  return kind === 'bonus' ? bonusTasks : habits.filter(habit => habit.type === kind);
 }
-
-// What tapping this habit RIGHT NOW would set the streak to — must mirror logHabit()'s logic exactly,
-// so the pill's displayed points always match what actually gets awarded on tap.
-function projectedStreak(habit){
-  const today = todayKey();
-  const yest = addDaysToKey(today, -1);
-  if(habit.lastDate === today) return habit.streak || 1;
-  if(habit.lastDate === yest) return (habit.streak || 0) + 1;
-  return 1;
+function taskMatchesEntry(kind, task, entry){
+  if(kind === 'bonus'){
+    if(entry.type !== 'bonus' || entry.derived) return false;
+    if(entry.bonusId) return entry.bonusId === task.id;
+    return bonusTasks.filter(item => item.name === task.name).length === 1 && entry.name === task.name;
+  }
+  if(entry.type !== kind) return false;
+  if(entry.habitId) return entry.habitId === task.id;
+  return habits.filter(item => item.type === kind && item.name === task.name).length === 1 && entry.name === task.name;
+}
+function taskUsageCounts(kind, list){
+  const counts = new Map(list.map(item => [item.id, 0]));
+  const linkKey = kind === 'bonus' ? 'bonusId' : 'habitId';
+  const byName = new Map();
+  for(const item of list){
+    if(!byName.has(item.name)) byName.set(item.name, []);
+    byName.get(item.name).push(item.id);
+  }
+  const start = statsStartKey();
+  const end = todayKey();
+  for(const entry of entries){
+    if(entry.date < start || entry.date > end || entry.type !== kind || entry.derived) continue;
+    const linkedId = entry[linkKey];
+    if(linkedId && counts.has(linkedId)){
+      counts.set(linkedId, counts.get(linkedId) + 1);
+      continue;
+    }
+    if(linkedId) continue;
+    const candidates = byName.get(entry.name) || [];
+    if(candidates.length === 1) counts.set(candidates[0], counts.get(candidates[0]) + 1);
+  }
+  return counts;
+}
+function manualTaskItems(kind){
+  return taskItems(kind).slice().sort((a, b) =>
+    (Number(a.order) || 0) - (Number(b.order) || 0) ||
+    a.name.localeCompare(b.name) ||
+    a.id.localeCompare(b.id)
+  );
+}
+function sortedTaskItems(kind){
+  const mode = taskSortModes[kind] || 'manual';
+  const list = manualTaskItems(kind);
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity:'base' }) || a.id.localeCompare(b.id);
+  const usage = mode === 'usage-desc' || mode === 'usage-asc' ? taskUsageCounts(kind, list) : null;
+  if(mode === 'name-asc') return list.sort(byName);
+  if(mode === 'name-desc') return list.sort((a, b) => -byName(a, b));
+  if(mode === 'usage-desc') return list.sort((a, b) => usage.get(b.id) - usage.get(a.id) || byName(a, b));
+  if(mode === 'usage-asc') return list.sort((a, b) => usage.get(a.id) - usage.get(b.id) || byName(a, b));
+  if(mode === 'points-desc') return list.sort((a, b) => b.points - a.points || byName(a, b));
+  if(mode === 'points-asc') return list.sort((a, b) => a.points - b.points || byName(a, b));
+  return list;
+}
+function nextTaskOrder(kind, excludeId){
+  const values = taskItems(kind).filter(item => item.id !== excludeId).map(item => Number(item.order) || 0);
+  return values.length ? Math.max(...values) + 1 : 0;
+}
+function taskOrderControls(kind, item, index, total){
+  if(taskSortModes[kind] !== 'manual' || total < 2) return '';
+  return `<span class="task-order-controls" aria-label="Manual order controls">
+    <button type="button" class="order-btn" data-action="move-task" data-kind="${kind}" data-id="${escapeHtml(item.id)}" data-direction="-1" ${index === 0 ? 'disabled' : ''} aria-label="Move ${escapeHtml(item.name)} up">↑</button>
+    <button type="button" class="order-btn" data-action="move-task" data-kind="${kind}" data-id="${escapeHtml(item.id)}" data-direction="1" ${index === total - 1 ? 'disabled' : ''} aria-label="Move ${escapeHtml(item.name)} down">↓</button>
+  </span>`;
+}
+function moveTask(kind, id, rawDirection){
+  if(!['good','bad','bonus'].includes(kind) || taskSortModes[kind] !== 'manual') return;
+  const list = manualTaskItems(kind);
+  const index = list.findIndex(item => item.id === id);
+  const direction = Number(rawDirection) < 0 ? -1 : 1;
+  const targetIndex = index + direction;
+  if(index < 0 || targetIndex < 0 || targetIndex >= list.length) return;
+  list.forEach((item, order) => { item.order = order; });
+  const current = list[index];
+  const target = list[targetIndex];
+  const currentOrder = current.order;
+  current.order = target.order;
+  target.order = currentOrder;
+  persistData();
+  renderAll();
+  setTimeout(() => {
+    const moved = document.querySelector(`[data-action="move-task"][data-kind="${kind}"][data-id="${id}"][data-direction="${rawDirection}"]`);
+    if(moved && !moved.disabled) moved.focus();
+  }, 0);
+}
+function setTaskSortMode(kind, mode){
+  if(!['good','bad','bonus'].includes(kind) || !TASK_SORT_OPTIONS.some(option => option[0] === mode)) return;
+  taskSortModes[kind] = mode;
+  persistSettings();
+  renderAll();
+}
+function renderSortSelect(kind){
+  const select = document.getElementById(`${kind}SortSelect`);
+  if(!select) return;
+  select.innerHTML = TASK_SORT_OPTIONS.map(([value, label]) =>
+    `<option value="${value}" ${taskSortModes[kind] === value ? 'selected' : ''}>${label}</option>`
+  ).join('');
+}
+function timestampForLedgerDate(date){
+  if(date === todayKey()) return Date.now();
+  const noon = new Date(`${date}T12:00:00`).getTime();
+  const sameDayCount = entries.filter(entry => entry.date === date).length;
+  return noon + sameDayCount;
 }
 
 function completedDayId(date){
@@ -203,7 +331,7 @@ function allActivityEntries(end = todayKey()){
 }
 
 /* ================= persistence ================= */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const DB_NAME = 'tally-ledger';
 const DB_VERSION = 1;
 const DB_STORE = 'records';
@@ -292,7 +420,7 @@ function validateBackupObject(parsed){
   let data;
   let settings;
   let revision = 0;
-  if(parsed.schemaVersion === SCHEMA_VERSION || parsed.schemaVersion === 2){
+  if(parsed.schemaVersion === SCHEMA_VERSION || parsed.schemaVersion === 3 || parsed.schemaVersion === 2){
     data = parsed.data;
     settings = parsed.settings;
     revision = Number.isInteger(parsed.revision) && parsed.revision >= 0 ? parsed.revision : 0;
@@ -316,7 +444,8 @@ function validateBackupObject(parsed){
       type,
       points: requireInteger(h.points, `Habit ${i + 1} points`, 1, 999),
       streak: requireInteger(h.streak == null ? 0 : h.streak, `Habit ${i + 1} streak`, 0, 100000),
-      lastDate
+      lastDate,
+      order: requireInteger(h.order == null ? i : h.order, `Habit ${i + 1} order`, 0, 1000000)
     };
   });
 
@@ -325,7 +454,8 @@ function validateBackupObject(parsed){
     return {
       id: requireId(b.id, `Bonus entry ${i + 1} ID`),
       name: requireString(b.name, `Bonus entry ${i + 1} name`, 60),
-      points: requireInteger(b.points, `Bonus entry ${i + 1} points`, 1, 999)
+      points: requireInteger(b.points, `Bonus entry ${i + 1} points`, 1, 999),
+      order: requireInteger(b.order == null ? i : b.order, `Bonus entry ${i + 1} order`, 0, 1000000)
     };
   });
 
@@ -391,6 +521,18 @@ function validateBackupObject(parsed){
   // the entire saved ledger.
   if(cleanStart > ledgerToday) cleanStart = ledgerToday;
   const backupDates = [validIsoTimestamp(settings.lastBackupAt), validIsoTimestamp(parsed.exportedAt)].filter(Boolean).sort();
+  const validSortModes = new Set(['manual','name-asc','name-desc','usage-desc','usage-asc','points-desc','points-asc']);
+  if(settings.taskSortModes != null && !isPlainObject(settings.taskSortModes)){
+    throw new Error('Task sorting settings are invalid.');
+  }
+  const requestedSortModes = isPlainObject(settings.taskSortModes) ? settings.taskSortModes : {};
+  const cleanSortModes = {};
+  for(const kind of ['good','bad','bonus']){
+    if(requestedSortModes[kind] != null && !validSortModes.has(requestedSortModes[kind])){
+      throw new Error(`The ${kind} task sorting setting is invalid.`);
+    }
+    cleanSortModes[kind] = validSortModes.has(requestedSortModes[kind]) ? requestedSortModes[kind] : 'manual';
+  }
 
   return {
     revision,
@@ -406,7 +548,8 @@ function validateBackupObject(parsed){
     trackingStartDate: cleanStart,
     lastBackupAt: backupDates.length ? backupDates[backupDates.length - 1] : null,
     historyRangeDays: [7,14,30,90,'all'].includes(settings.historyRangeDays) ? settings.historyRangeDays : 14,
-    backupReminderDays: requireInteger(settings.backupReminderDays == null ? 7 : settings.backupReminderDays, 'Backup reminder cadence', 0, 366)
+    backupReminderDays: requireInteger(settings.backupReminderDays == null ? 7 : settings.backupReminderDays, 'Backup reminder cadence', 0, 366),
+    taskSortModes: cleanSortModes
   };
 }
 
@@ -424,7 +567,10 @@ function buildSnapshot(){
       completedDays: completedDays.map(day => ({ ...day })),
       entries: entries.map(e => ({ ...e }))
     },
-    settings: { dailyBase, successThreshold, dayStartHour, trackingStartDate, lastBackupAt, historyRangeDays, backupReminderDays }
+    settings: {
+      dailyBase, successThreshold, dayStartHour, trackingStartDate, lastBackupAt,
+      historyRangeDays, backupReminderDays, taskSortModes:{ ...taskSortModes }
+    }
   };
 }
 function buildExport(){
@@ -445,6 +591,7 @@ function applyValidatedState(clean){
   lastBackupAt = clean.lastBackupAt;
   historyRangeDays = clean.historyRangeDays;
   backupReminderDays = clean.backupReminderDays;
+  taskSortModes = { ...clean.taskSortModes };
   stateRevision = clean.revision || 0;
   recomputeAllHabitStreaks();
 }
@@ -610,7 +757,8 @@ function snapshotFromClean(clean){
       trackingStartDate:clean.trackingStartDate,
       lastBackupAt:clean.lastBackupAt,
       historyRangeDays:clean.historyRangeDays,
-      backupReminderDays:clean.backupReminderDays
+      backupReminderDays:clean.backupReminderDays,
+      taskSortModes:{ ...clean.taskSortModes }
     }
   };
 }
@@ -651,13 +799,28 @@ function mergeConcurrentSnapshots(baseSnapshot, localSnapshot, remoteSnapshot){
   const settings = {};
   let hadDirectConflict = habitsMerge.hadDirectConflict || bonusMerge.hadDirectConflict ||
     milestoneMerge.hadDirectConflict || completedDayMerge.hadDirectConflict || entryMerge.hadDirectConflict;
-  for(const key of ['dailyBase','successThreshold','dayStartHour','trackingStartDate','lastBackupAt','historyRangeDays','backupReminderDays']){
+  for(const key of ['dailyBase','successThreshold','dayStartHour','trackingStartDate','lastBackupAt','historyRangeDays','backupReminderDays','taskSortModes']){
     const b = base.settings[key];
     const l = localSnapshot.settings[key];
     const r = remoteSnapshot.settings[key];
     if(key === 'lastBackupAt'){
       const dates = [validIsoTimestamp(l), validIsoTimestamp(r)].filter(Boolean).sort();
       settings[key] = dates.length ? dates[dates.length - 1] : null;
+      continue;
+    }
+    if(key === 'taskSortModes'){
+      settings[key] = {};
+      for(const kind of ['good','bad','bonus']){
+        const baseMode = b[kind];
+        const localMode = l[kind];
+        const remoteMode = r[kind];
+        if(valuesEqual(localMode, baseMode)) settings[key][kind] = remoteMode;
+        else if(valuesEqual(remoteMode, baseMode) || valuesEqual(localMode, remoteMode)) settings[key][kind] = localMode;
+        else {
+          settings[key][kind] = localMode;
+          hadDirectConflict = true;
+        }
+      }
       continue;
     }
     if(valuesEqual(l, b)) settings[key] = r;
@@ -1523,20 +1686,11 @@ function resolveConfirm(result){
 function logHabit(id){
   const h = habits.find(x => x.id === id);
   if(!h) return;
-  const today = todayKey();
-  let pts;
-
-  if(h.type === 'good'){
-    h.streak = projectedStreak(h);
-    h.lastDate = today;
-    const mult = streakMultiplier(h.streak);
-    pts = Math.max(1, Math.round(h.points * mult));
-  } else {
-    pts = -Math.abs(h.points);
-  }
-
-  const entry = { id: uid(), date: today, name: h.name, type: h.type, points: pts, ts: Date.now(), habitId: h.id };
+  const date = activeLedgerDate();
+  const pts = h.type === 'good' ? Math.max(1, Math.round(h.points)) : -Math.abs(h.points);
+  const entry = { id: uid(), date, name: h.name, type: h.type, points: pts, ts: timestampForLedgerDate(date), habitId: h.id };
   entries.push(entry);
+  if(h.type === 'good') recomputeHabitStreak(h);
   persistData();
   renderAll(true);
   showUndoToast(entry);
@@ -1545,7 +1699,8 @@ function logHabit(id){
 function logBonus(id){
   const b = bonusTasks.find(x => x.id === id);
   if(!b) return;
-  const entry = { id: uid(), date: todayKey(), name: b.name, type: 'bonus', points: Math.abs(b.points), ts: Date.now(), bonusId: b.id };
+  const date = activeLedgerDate();
+  const entry = { id: uid(), date, name: b.name, type: 'bonus', points: Math.abs(b.points), ts: timestampForLedgerDate(date), bonusId: b.id };
   entries.push(entry);
   persistData();
   renderAll(true);
@@ -1556,7 +1711,7 @@ function setExplicitCompletion(date, shouldComplete){
   if(!isValidDateKey(date) || date < statsStartKey() || date > todayKey()) return;
   const existing = explicitCompletionForDate(date);
   if(shouldComplete && !existing){
-    completedDays.push({ id:completedDayId(date), date, ts:Date.now() });
+    completedDays.push({ id:completedDayId(date), date, ts:timestampForLedgerDate(date) });
   }else if(!shouldComplete && existing){
     completedDays = completedDays.filter(day => day.date !== date);
   }else{
@@ -1728,6 +1883,7 @@ function saveHabit(){
     const h = habits.find(x => x.id === editingHabitId);
     if(!h) return showFieldError('habitError', 'This habit no longer exists. Close and try again.');
     const typeChanged = h.type !== habitTypeDraft;
+    if(typeChanged) h.order = nextTaskOrder(habitTypeDraft, h.id);
     h.name = name;
     h.points = points;
     h.type = habitTypeDraft;
@@ -1736,7 +1892,10 @@ function saveHabit(){
       else { h.streak = 0; h.lastDate = null; }
     }
   } else {
-    habits.push({ id: uid(), name, type: habitTypeDraft, points, streak: 0, lastDate: null });
+    habits.push({
+      id: uid(), name, type: habitTypeDraft, points, streak:0, lastDate:null,
+      order:nextTaskOrder(habitTypeDraft)
+    });
   }
   persistData();
   closeHabitModal();
@@ -1791,7 +1950,7 @@ function saveBonus(){
     if(!b) return showFieldError('bonusError', 'This bonus entry no longer exists. Close and try again.');
     b.name = name; b.points = points;
   } else {
-    bonusTasks.push({ id: uid(), name, points });
+    bonusTasks.push({ id:uid(), name, points, order:nextTaskOrder('bonus') });
   }
   persistData();
   closeBonusModal();
@@ -2121,7 +2280,7 @@ function csvCell(value, protectFormula){
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-const FULL_CSV_BACKUP_VERSION = '3';
+const FULL_CSV_BACKUP_VERSION = '4';
 const FULL_CSV_V1_HEADERS = [
   'format_version','record_type','revision','writer_id','id','name_json','type',
   'points','streak','last_date','ledger_date','timestamp_ms','habit_id','bonus_id',
@@ -2129,7 +2288,11 @@ const FULL_CSV_V1_HEADERS = [
   'history_range_days','last_backup_at','exported_at'
 ];
 const FULL_CSV_V2_HEADERS = [...FULL_CSV_V1_HEADERS, 'threshold_days', 'description_json'];
-const FULL_CSV_HEADERS = [...FULL_CSV_V2_HEADERS, 'backup_reminder_days'];
+const FULL_CSV_V3_HEADERS = [...FULL_CSV_V2_HEADERS, 'backup_reminder_days'];
+const FULL_CSV_HEADERS = [
+  ...FULL_CSV_V3_HEADERS,
+  'good_sort_mode','bad_sort_mode','bonus_sort_mode','manual_order'
+];
 function fullCsvRow(values){
   return FULL_CSV_HEADERS.map(header => values[header] == null ? '' : values[header]);
 }
@@ -2151,7 +2314,10 @@ function buildFullCsvBackup(){
       tracking_start_date:snapshot.settings.trackingStartDate,
       history_range_days:snapshot.settings.historyRangeDays,
       last_backup_at:snapshot.settings.lastBackupAt || '',
-      backup_reminder_days:snapshot.settings.backupReminderDays
+      backup_reminder_days:snapshot.settings.backupReminderDays,
+      good_sort_mode:snapshot.settings.taskSortModes.good,
+      bad_sort_mode:snapshot.settings.taskSortModes.bad,
+      bonus_sort_mode:snapshot.settings.taskSortModes.bonus
     }),
     ...snapshot.data.habits.map(habit => fullCsvRow({
       record_type:'habit',
@@ -2160,13 +2326,15 @@ function buildFullCsvBackup(){
       type:habit.type,
       points:habit.points,
       streak:habit.streak,
-      last_date:habit.lastDate || ''
+      last_date:habit.lastDate || '',
+      manual_order:habit.order
     })),
     ...snapshot.data.bonusTasks.map(bonus => fullCsvRow({
       record_type:'bonus',
       id:bonus.id,
       name_json:JSON.stringify(bonus.name),
-      points:bonus.points
+      points:bonus.points,
+      manual_order:bonus.order
     })),
     ...snapshot.data.milestones.map(milestone => fullCsvRow({
       record_type:'milestone',
@@ -2293,9 +2461,11 @@ function parseFullCsvBackup(raw){
     rows[0].length === headers.length && headers.every((header, index) => rows[0][index] === header);
   const headers = matchesHeaders(FULL_CSV_HEADERS)
     ? FULL_CSV_HEADERS
-    : (matchesHeaders(FULL_CSV_V2_HEADERS)
-      ? FULL_CSV_V2_HEADERS
-      : (matchesHeaders(FULL_CSV_V1_HEADERS) ? FULL_CSV_V1_HEADERS : null));
+    : (matchesHeaders(FULL_CSV_V3_HEADERS)
+      ? FULL_CSV_V3_HEADERS
+      : (matchesHeaders(FULL_CSV_V2_HEADERS)
+        ? FULL_CSV_V2_HEADERS
+        : (matchesHeaders(FULL_CSV_V1_HEADERS) ? FULL_CSV_V1_HEADERS : null)));
   if(!headers){
     throw new Error('This is not a recognized Tally CSV backup.');
   }
@@ -2317,7 +2487,7 @@ function parseFullCsvBackup(raw){
   assertCsvFields(meta.values, ['format_version','record_type','revision','writer_id','exported_at'], meta.rowNumber, headers);
   const expectedVersion = headers === FULL_CSV_HEADERS
     ? FULL_CSV_BACKUP_VERSION
-    : (headers === FULL_CSV_V2_HEADERS ? '2' : '1');
+    : (headers === FULL_CSV_V3_HEADERS ? '3' : (headers === FULL_CSV_V2_HEADERS ? '2' : '1'));
   if(meta.values.format_version !== expectedVersion){
     throw new Error(`CSV backup version ${meta.values.format_version || '(missing)'} is not supported.`);
   }
@@ -2331,7 +2501,7 @@ function parseFullCsvBackup(raw){
   assertCsvFields(settings, [
     'record_type','daily_base','success_threshold','day_start_hour',
     'tracking_start_date','history_range_days','last_backup_at',
-    'backup_reminder_days'
+    'backup_reminder_days','good_sort_mode','bad_sort_mode','bonus_sort_mode'
   ], settingsRow.rowNumber, headers);
   if(settings.last_backup_at && !validIsoTimestamp(settings.last_backup_at)){
     throw new Error('The CSV backup has an invalid previous backup date.');
@@ -2350,22 +2520,30 @@ function parseFullCsvBackup(raw){
     const value = record.values;
     if(value.record_type === 'meta' || value.record_type === 'settings') continue;
     if(value.record_type === 'habit'){
-      assertCsvFields(value, ['record_type','id','name_json','type','points','streak','last_date'], record.rowNumber, headers);
-      habits.push({
+      assertCsvFields(value, ['record_type','id','name_json','type','points','streak','last_date','manual_order'], record.rowNumber, headers);
+      const habit = {
         id:value.id,
         name:csvBackupName(value.name_json, record.rowNumber),
         type:value.type,
         points:csvBackupInteger(value.points, `Row ${record.rowNumber} points`, 1, 999),
         streak:csvBackupInteger(value.streak, `Row ${record.rowNumber} streak`, 0, 100000),
         lastDate:value.last_date || null
-      });
+      };
+      if(headers === FULL_CSV_HEADERS){
+        habit.order = csvBackupInteger(value.manual_order, `Row ${record.rowNumber} manual order`, 0, 1000000);
+      }
+      habits.push(habit);
     }else if(value.record_type === 'bonus'){
-      assertCsvFields(value, ['record_type','id','name_json','points'], record.rowNumber, headers);
-      bonusTasks.push({
+      assertCsvFields(value, ['record_type','id','name_json','points','manual_order'], record.rowNumber, headers);
+      const bonus = {
         id:value.id,
         name:csvBackupName(value.name_json, record.rowNumber),
         points:csvBackupInteger(value.points, `Row ${record.rowNumber} points`, 1, 999)
-      });
+      };
+      if(headers === FULL_CSV_HEADERS){
+        bonus.order = csvBackupInteger(value.manual_order, `Row ${record.rowNumber} manual order`, 0, 1000000);
+      }
+      bonusTasks.push(bonus);
     }else if(value.record_type === 'entry'){
       assertCsvFields(value, [
         'record_type','id','name_json','type','points','ledger_date',
@@ -2428,9 +2606,16 @@ function parseFullCsvBackup(raw){
       lastBackupAt:settings.last_backup_at || null,
       // Version 1/2 CSV files predate this column. Default legacy imports to Off
       // rather than unexpectedly enabling reminders that the file could not express.
-      backupReminderDays:headers === FULL_CSV_HEADERS
+      backupReminderDays:headers === FULL_CSV_HEADERS || headers === FULL_CSV_V3_HEADERS
         ? csvBackupInteger(settings.backup_reminder_days, 'Backup reminder cadence', 0, 366)
-        : 0
+        : 0,
+      taskSortModes:headers === FULL_CSV_HEADERS
+        ? {
+            good:settings.good_sort_mode,
+            bad:settings.bad_sort_mode,
+            bonus:settings.bonus_sort_mode
+          }
+        : { good:'manual', bad:'manual', bonus:'manual' }
     }
   });
 }
@@ -2581,7 +2766,7 @@ function mergeImportedState(clean){
     settings:{
       dailyBase, successThreshold, dayStartHour, trackingStartDate,
       lastBackupAt:laterBackup.length ? laterBackup[laterBackup.length - 1] : null,
-      historyRangeDays, backupReminderDays
+      historyRangeDays, backupReminderDays, taskSortModes:{ ...taskSortModes }
     }
   };
 }
@@ -2680,6 +2865,7 @@ async function resetSettings(){
     trackingStartDate = inferredStartDate([...entries, ...completedDays], dayStartHour);
     historyRangeDays = 14;
     backupReminderDays = 7;
+    taskSortModes = { good:'manual', bad:'manual', bonus:'manual' };
     recomputeAllHabitStreaks();
     await persistSettings();
     renderAll();
@@ -2687,10 +2873,55 @@ async function resetSettings(){
 }
 
 /* ================= rendering ================= */
+function ledgerDateCaption(date){
+  if(date === todayKey()) return 'Today';
+  if(date === addDaysToKey(todayKey(), -1)) return 'Yesterday';
+  return new Date(`${date}T12:00:00`).toLocaleDateString('en-US', {
+    weekday:'short', month:'short', day:'numeric'
+  });
+}
+function renderTodayNavigator(){
+  const date = activeLedgerDate();
+  const input = document.getElementById('todayDateInput');
+  input.min = statsStartKey();
+  input.max = todayKey();
+  input.value = date;
+  document.getElementById('todayDateCaption').textContent = ledgerDateCaption(date);
+  document.getElementById('todayPrevBtn').disabled = date <= statsStartKey();
+  document.getElementById('todayNextBtn').disabled = date >= todayKey();
+  document.getElementById('returnTodayBtn').disabled = date === todayKey();
+  document.getElementById('activitySectionTitle').textContent =
+    date === todayKey()
+      ? "Today's activity"
+      : (date === addDaysToKey(todayKey(), -1) ? "Yesterday's activity" : `${ledgerDateCaption(date)} activity`);
+}
+function navigateToday(rawOffset){
+  const target = addDaysToKey(activeLedgerDate(), Number(rawOffset) < 0 ? -1 : 1);
+  if(target < statsStartKey() || target > todayKey()) return;
+  todayViewDate = target;
+  renderAll();
+}
+function setTodayViewDate(date){
+  if(!isValidDateKey(date) || date < statsStartKey() || date > todayKey()){
+    renderTodayNavigator();
+    return;
+  }
+  todayViewDate = date;
+  renderAll();
+}
+function returnToToday(){
+  todayViewDate = todayKey();
+  renderAll();
+}
+
 function renderAll(didLog){
+  renderTodayNavigator();
   renderHeader(didLog);
-  renderCompletionControl(todayKey(), 'todayCompletionControl');
+  renderCompletionControl(activeLedgerDate(), 'todayCompletionControl');
   renderActivityLog();
+  renderSortSelect('good');
+  renderSortSelect('bad');
+  renderSortSelect('bonus');
   renderHabitList('good', 'goodList', 'No credits yet —', 'add your first one to start earning.', 'good');
   renderHabitList('bad', 'badList', 'No debits yet —', 'add one for a habit you want to cut back.', 'bad');
   renderBonusList();
@@ -2707,9 +2938,8 @@ function renderAll(didLog){
   }
 }
 
-function todayEntries(){
-  const t = todayKey();
-  return allActivityEntries(t).filter(e => e.date === t);
+function todayEntries(date = activeLedgerDate()){
+  return allActivityEntries(date).filter(entry => entry.date === date);
 }
 
 function renderCompletionControl(date, elementId){
@@ -2758,19 +2988,21 @@ function switchView(view){
     updateStorageStatus();
     renderCloudStatus();
   }
+  renderHeader();
 }
 
 function renderHeader(didLog){
   // Label the ledger day itself (which may still be "yesterday" until 7am), not
   // whatever the calendar says right now — otherwise the header could say Tuesday
   // while the score underneath is still Monday's, until the 7am rollover catches up.
-  const ledgerDate = new Date(todayKey() + 'T00:00:00');
+  const shownDate = activeView === 'today' ? activeLedgerDate() : todayKey();
+  const ledgerDate = new Date(shownDate + 'T00:00:00');
   document.getElementById('dateLabel').textContent =
     ledgerDate.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' }).toUpperCase();
 
-  const todays = todayEntries();
+  const todays = todayEntries(shownDate);
   const net = todays.reduce((s,e) => s + (Number(e.points) || 0), 0);
-  const manualNet = entries.filter(entry => entry.date === todayKey()).reduce((sum, entry) => sum + (Number(entry.points) || 0), 0);
+  const manualNet = entries.filter(entry => entry.date === shownDate).reduce((sum, entry) => sum + (Number(entry.points) || 0), 0);
   const score = dailyBase + net;
   const allTime = allActivityEntries()
     .filter(entry => isInStatsWindow(entry.date))
@@ -2782,14 +3014,15 @@ function renderHeader(didLog){
 
   scoreEl.textContent = score;
   scoreEl.className = 'score tabular mono ' + tone;
-  statusEl.textContent = net > 0 ? `▲ +${net} today` : net < 0 ? `▼ ${net} today` : '— even today';
+  const periodLabel = shownDate === todayKey() ? 'today' : 'on this day';
+  statusEl.textContent = net > 0 ? `▲ +${net} ${periodLabel}` : net < 0 ? `▼ ${net} ${periodLabel}` : `— even ${periodLabel}`;
   statusEl.className = 'status-label ' + tone;
 
   document.getElementById('allTimeEl').textContent = (allTime > 0 ? '+' : '') + allTime;
 
   const successEl = document.getElementById('successTagEl');
-  const todayTracked = isDayTracked(todayKey());
-  if(!todayTracked){
+  const dayTracked = isDayTracked(shownDate);
+  if(!dayTracked){
     successEl.textContent = 'Untracked · log activity or mark complete';
     successEl.className = 'success-tag';
   }else if(dailyBase + manualNet >= successThreshold){
@@ -2811,31 +3044,29 @@ function renderHeader(didLog){
 
 function renderHabitList(type, elId, emptyLead, emptyRest, addType){
   const el = document.getElementById(elId);
-  const list = habits.filter(h => h.type === type);
+  const list = sortedTaskItems(type);
 
   if(list.length === 0){
     el.innerHTML = `<div class="empty">${emptyLead} <button type="button" data-action="open-habit" data-type="${addType}">${emptyRest}</button></div>`;
     return;
   }
 
-  const today = todayKey();
-  el.innerHTML = list.map(h => {
-    const confirmedStreak = activeStreakDisplay(h);   // streak already locked in, for the badge count
-    const upcomingStreak = projectedStreak(h);         // what tapping now would make it — for the payout
-    const todaysCount = entries.filter(e => e.date === today && (e.habitId ? e.habitId === h.id : (e.name === h.name && e.type === h.type))).length;
+  const date = activeLedgerDate();
+  const countLabel = date === todayKey() ? 'today' : 'this day';
+  el.innerHTML = list.map((h, index) => {
+    const confirmedStreak = habitStreakThroughDate(h, date);
+    const todaysCount = entries.filter(e => e.date === date && taskMatchesEntry(type, h, e)).length;
     let sub = '';
     if(type === 'good'){
       if(confirmedStreak >= 2){
-        const mult = streakMultiplier(upcomingStreak).toFixed(2);
-        sub = `🔥 ${confirmedStreak}-day streak · ×${mult}`;
+        sub = `🔥 ${confirmedStreak}-day streak`;
       }
-      if(todaysCount > 0) sub += (sub ? ' · ' : '') + `${todaysCount}× today`;
+      if(todaysCount > 0) sub += (sub ? ' · ' : '') + `${todaysCount}× ${countLabel}`;
     } else {
-      if(todaysCount > 0) sub = `${todaysCount}× today`;
+      if(todaysCount > 0) sub = `${todaysCount}× ${countLabel}`;
     }
 
-    const mult = type === 'good' ? streakMultiplier(upcomingStreak) : 1;
-    const displayPts = type === 'good' ? Math.max(1, Math.round(h.points * mult)) : h.points;
+    const displayPts = h.points;
     const sign = type === 'good' ? '+' : '−';
     const pillClass = type === 'good' ? '' : 'loss';
 
@@ -2845,6 +3076,7 @@ function renderHabitList(type, elId, emptyLead, emptyRest, addType){
           <div class="row-name">${escapeHtml(h.name)}</div>
           ${sub ? `<div class="row-sub mono">${sub}</div>` : ''}
         </button>
+        ${taskOrderControls(type, h, index, list.length)}
         <button type="button" class="pill ${pillClass} mono" data-action="log-habit" data-id="${escapeHtml(h.id)}">${sign}${displayPts}</button>
         <button type="button" class="edit-btn" data-action="open-habit" data-type="${type}" data-id="${escapeHtml(h.id)}" aria-label="Edit ${escapeHtml(h.name)}">✎</button>
       </div>`;
@@ -2853,19 +3085,22 @@ function renderHabitList(type, elId, emptyLead, emptyRest, addType){
 
 function renderBonusList(){
   const el = document.getElementById('bonusList');
-  if(bonusTasks.length === 0){
+  const list = sortedTaskItems('bonus');
+  if(list.length === 0){
     el.innerHTML = `<div class="empty">No bonus entries yet — <button type="button" data-action="open-bonus">add a one-off you want to reward.</button></div>`;
     return;
   }
-  const today = todayKey();
-  el.innerHTML = bonusTasks.map(b => {
-    const todaysCount = entries.filter(e => e.date === today && (e.bonusId ? e.bonusId === b.id : (e.name === b.name && e.type === 'bonus'))).length;
+  const date = activeLedgerDate();
+  const countLabel = date === todayKey() ? 'today' : 'this day';
+  el.innerHTML = list.map((b, index) => {
+    const todaysCount = entries.filter(e => e.date === date && taskMatchesEntry('bonus', b, e)).length;
     return `
       <div class="row">
         <button type="button" class="row-main" style="background:none;border:none;text-align:left;padding:0;color:inherit" data-action="log-bonus" data-id="${escapeHtml(b.id)}">
           <div class="row-name">✦ ${escapeHtml(b.name)}</div>
-          ${todaysCount > 0 ? `<div class="row-sub mono">${todaysCount}× today</div>` : ''}
+          ${todaysCount > 0 ? `<div class="row-sub mono">${todaysCount}× ${countLabel}</div>` : ''}
         </button>
+        ${taskOrderControls('bonus', b, index, list.length)}
         <button type="button" class="pill bonus mono" data-action="log-bonus" data-id="${escapeHtml(b.id)}">+${b.points}</button>
         <button type="button" class="edit-btn" data-action="open-bonus" data-id="${escapeHtml(b.id)}" aria-label="Edit ${escapeHtml(b.name)}">✎</button>
       </div>`;
@@ -3691,8 +3926,8 @@ function toggleActivityLog(){
   renderActivityLog();
 }
 function renderActivityLog(){
-  const today = todayKey();
-  const todays = allActivityEntries(today).filter(e => e.date === today).slice().sort((a, b) => b.ts - a.ts);
+  const date = activeLedgerDate();
+  const todays = allActivityEntries(date).filter(e => e.date === date).slice().sort((a, b) => b.ts - a.ts);
 
   document.getElementById('activityToggleBtn').textContent =
     (activityLogOpen ? 'Hide' : 'Show') + ` (${todays.length})`;
@@ -3702,7 +3937,7 @@ function renderActivityLog(){
   if(!activityLogOpen) return;
 
   if(todays.length === 0){
-    el.innerHTML = `<div class="empty">Nothing logged yet today.</div>`;
+    el.innerHTML = `<div class="empty">Nothing logged ${date === todayKey() ? 'yet today' : `on ${ledgerDateCaption(date)}`}.</div>`;
     return;
   }
 
@@ -3718,7 +3953,7 @@ function renderActivityLog(){
           <div class="row-sub mono">${e.derived ? `Automatic milestone · ${time}` : time}</div>
         </div>
         <span class="pill ${tone} mono" style="pointer-events:none;">${sign}${points}</span>
-        ${e.derived ? '' : `<button type="button" class="edit-btn" data-action="remove-entry" data-id="${escapeHtml(e.id)}" aria-label="Remove ${escapeHtml(e.name)} from today's log">✕</button>`}
+        ${e.derived ? '' : `<button type="button" class="edit-btn" data-action="remove-entry" data-id="${escapeHtml(e.id)}" aria-label="Remove ${escapeHtml(e.name)} from ${date}">✕</button>`}
       </div>`;
   }).join('');
 }
@@ -3732,6 +3967,9 @@ document.addEventListener('click', event => {
   switch(action){
     case 'switch-view': switchView(target.dataset.view); break;
     case 'toggle-activity': toggleActivityLog(); break;
+    case 'navigate-today': navigateToday(target.dataset.offset); break;
+    case 'return-today': returnToToday(); break;
+    case 'move-task': moveTask(target.dataset.kind, id, target.dataset.direction); break;
     case 'open-habit': openHabitModal(target.dataset.type || 'good', id); break;
     case 'close-habit': closeHabitModal(); break;
     case 'set-habit-type': setHabitType(target.dataset.type); break;
@@ -3790,6 +4028,12 @@ document.addEventListener('click', event => {
 });
 
 document.getElementById('backupText').addEventListener('click', event => event.currentTarget.select());
+document.getElementById('todayDateInput').addEventListener('change', event => {
+  setTodayViewDate(event.target.value);
+});
+document.querySelectorAll('[data-sort-kind]').forEach(select => {
+  select.addEventListener('change', event => setTaskSortMode(event.currentTarget.dataset.sortKind, event.currentTarget.value));
+});
 document.getElementById('restoreFileInput').addEventListener('change', async event => {
   const file = event.target.files && event.target.files[0];
   if(!file) return;
@@ -3899,7 +4143,9 @@ loadAll().then(() => { lastKnownDay = todayKey(); });
 function refreshIfNewDay(){
   const now = todayKey();
   if(now !== lastKnownDay){
+    const wasShowingLatest = !isValidDateKey(todayViewDate) || todayViewDate === lastKnownDay;
     lastKnownDay = now;
+    if(wasShowingLatest) todayViewDate = now;
     renderAll();
   }
 }

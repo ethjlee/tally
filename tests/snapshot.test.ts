@@ -5,7 +5,7 @@ import { parseSnapshot, syncPutSchema } from "../lib/snapshot";
 function validSnapshot() {
   return {
     app: "Tally" as const,
-    schemaVersion: 3 as const,
+    schemaVersion: 4 as const,
     savedAt: "2026-07-29T12:00:00.000Z",
     revision: 4,
     writerId: "device_1",
@@ -17,7 +17,8 @@ function validSnapshot() {
           type: "good" as const,
           points: 10,
           streak: 2,
-          lastDate: "2026-07-29"
+          lastDate: "2026-07-29",
+          order: 0
         }
       ],
       bonusTasks: [],
@@ -52,15 +53,41 @@ function validSnapshot() {
       trackingStartDate: "2026-07-01",
       lastBackupAt: null,
       historyRangeDays: 30 as const,
-      backupReminderDays: 14
+      backupReminderDays: 14,
+      taskSortModes: {
+        good: "manual" as const,
+        bad: "usage-desc" as const,
+        bonus: "name-asc" as const
+      }
     }
   };
 }
 
 test("server accepts the complete current ledger schema", () => {
   const parsed = parseSnapshot(validSnapshot());
+  assert.equal(parsed.schemaVersion, 4);
+  if (parsed.schemaVersion !== 4) throw new Error("Expected current schema");
   assert.equal(parsed.settings.backupReminderDays, 14);
+  assert.equal(parsed.settings.taskSortModes.bad, "usage-desc");
+  assert.equal(parsed.data.habits[0].order, 0);
   assert.equal(parsed.data.milestones.length, 1);
+});
+
+test("server accepts the deployed version-3 cloud snapshot during rolling upgrade", () => {
+  const legacy: any = structuredClone(validSnapshot());
+  legacy.schemaVersion = 3;
+  delete legacy.settings.taskSortModes;
+  legacy.data.habits.forEach((item: any) => delete item.order);
+  legacy.data.bonusTasks.forEach((item: any) => delete item.order);
+  const parsed = parseSnapshot(legacy);
+  assert.equal(parsed.schemaVersion, 3);
+
+  const put = syncPutSchema.parse({
+    baseRevision: 4,
+    operationId: "legacy_device_write",
+    snapshot: legacy
+  });
+  assert.equal(put.snapshot.schemaVersion, 3);
 });
 
 test("server rejects duplicate IDs and duplicate completed dates", () => {
@@ -88,6 +115,10 @@ test("server rejects wrong point signs and unknown fields", () => {
 
   const withUnknown = { ...validSnapshot(), unexpected: "do not persist this" };
   assert.throws(() => parseSnapshot(withUnknown));
+
+  const invalidSort: any = validSnapshot();
+  invalidSort.settings.taskSortModes.good = "random";
+  assert.throws(() => parseSnapshot(invalidSort));
 });
 
 test("server validates optimistic revision and operation ID", () => {

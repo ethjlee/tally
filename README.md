@@ -87,6 +87,15 @@ Tally remains local-first:
 
 Unknown days, milestone rules, backup reminders, complete JSON/CSV backup and restore, dashed history gaps, statistics, and forecasts remain part of the original Tally client.
 
+Credit habits always award their configured point value. Their individual streak
+is informational only; automatic milestone rewards remain the configurable way to
+award longer-term consistency.
+
+On the Today tab, use the date navigator to backfill an earlier tracked day
+directly with the same credit, debit, and bonus buttons. Each task section can be
+sorted manually, alphabetically, by usage, or by point value. Manual order and sort
+preferences sync across devices and are included in complete JSON/CSV backups.
+
 ## Updating
 
 Run the full check before deployment:
