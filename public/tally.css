@@ -29,6 +29,14 @@
     min-height:100dvh;
     padding-bottom:env(safe-area-inset-bottom);
   }
+  body::before{
+    content:"";
+    position:fixed; inset:0 0 auto;
+    height:env(safe-area-inset-top);
+    background:var(--panel);
+    z-index:6;
+    pointer-events:none;
+  }
 
   .mono{ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
   .tabular{ font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1; }
@@ -95,7 +103,10 @@
     padding:12px 20px 13px;
     padding-top:calc(12px + env(safe-area-inset-top));
   }
-  .banner.show ~ header.top{ padding-top:12px; }
+  .banner.show ~ header.top{
+    top:env(safe-area-inset-top);
+    padding-top:12px;
+  }
 
   .brand{
     display:flex; align-items:center; gap:8px;
