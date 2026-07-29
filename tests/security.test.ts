@@ -75,3 +75,10 @@ test("current backup reminder and unknown-day behavior remain in the deployed cl
   assert.match(client, /chart-score-gap/);
   assert.match(client, /scoreGapPath/);
 });
+
+test("top banners respect the device safe area without stacking the inset", () => {
+  const css = read("public/tally.css");
+  assert.match(css, /\.banner\.show\s*\{[^}]*padding-top:calc\(8px \+ env\(safe-area-inset-top\)\)/s);
+  assert.match(css, /\.banner\.show\s*~\s*\.banner\.show\s*\{\s*padding-top:8px;/);
+  assert.match(css, /\.banner\.show\s*~\s*header\.top\s*\{\s*padding-top:12px;/);
+});

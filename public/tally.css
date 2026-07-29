@@ -61,7 +61,11 @@
     padding:8px 12px;
     display:none;
   }
-  .banner.show{ display:flex; align-items:center; justify-content:space-between; gap:10px; text-align:left; }
+  .banner.show{
+    display:flex; align-items:center; justify-content:space-between; gap:10px; text-align:left;
+    padding-top:calc(8px + env(safe-area-inset-top));
+  }
+  .banner.show ~ .banner.show{ padding-top:8px; }
   .banner .banner-text{ flex:1; min-width:0; }
   .banner > button{
     flex:none; background:none; border:1px solid transparent; color:var(--muted);
@@ -91,6 +95,7 @@
     padding:12px 20px 13px;
     padding-top:calc(12px + env(safe-area-inset-top));
   }
+  .banner.show ~ header.top{ padding-top:12px; }
 
   .brand{
     display:flex; align-items:center; gap:8px;
