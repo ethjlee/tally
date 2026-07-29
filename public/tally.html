@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tally</title>
+
+<!-- iOS "Add to Home Screen" behavior -->
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tally">
+<meta name="theme-color" content="#14171C">
+<meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex">
+<link rel="apple-touch-icon" href="/icons/tally-192.png">
+<link rel="icon" href="/icons/tally.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+
+<link rel="stylesheet" href="/tally.css">
+</head>
+<body>
+
+<div class="loading-screen" id="loadingScreen">Checking private ledger…</div>
+
+<noscript>
+  <div style="position:fixed;inset:0;z-index:100;background:#14171C;color:#ECE8DE;display:flex;align-items:center;justify-content:center;padding:32px;text-align:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.6;">
+    <div>
+      <div style="font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:#888D97;font-weight:600;margin-bottom:12px;">Tally</div>
+      <div style="font-size:15px;">Tally needs JavaScript to run. Please enable it in your browser settings and reload this page.</div>
+    </div>
+  </div>
+</noscript>
+
+<div class="shell">
+
+  <div class="banner" id="storageBanner">
+    <span class="banner-text">This browser doesn't support saving data — your ledger won't be kept between sessions.</span>
+    <button type="button" data-action="dismiss-storage-banner" aria-label="Dismiss storage message">Dismiss</button>
+  </div>
+  <div class="banner reminder" id="reminderBanner">
+    <span class="reminder-text"></span>
+    <span class="reminder-actions">
+      <button type="button" data-action="reminder-backup">Back up now</button>
+      <button type="button" data-action="reminder-dismiss" aria-label="Dismiss backup reminder">Dismiss</button>
+    </span>
+  </div>
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100" height="100" rx="22" fill="#14171C"/>
+        <g stroke="#C9A227" stroke-width="9" stroke-linecap="round">
+          <line x1="28" y1="24" x2="28" y2="76"/>
+          <line x1="42" y1="24" x2="42" y2="76"/>
+          <line x1="56" y1="24" x2="56" y2="76"/>
+          <line x1="70" y1="24" x2="70" y2="76"/>
+          <line x1="20" y1="68" x2="78" y2="32"/>
+        </g>
+      </svg>
+      <span class="brand-name">Tally</span>
+      <span class="brand-date" id="dateLabel"></span>
+    </div>
+
+    <div class="score-wrap">
+      <div class="baseline-tag">Baseline<button type="button" data-action="open-settings">change</button></div>
+      <div class="score even tabular mono" id="scoreEl">100</div>
+      <div class="status-label even" id="statusEl">— EVEN TODAY</div>
+      <div class="success-tag" id="successTagEl">—</div>
+      <div class="threshold-progress" aria-hidden="true"><span id="thresholdProgressEl"></span></div>
+      <div class="alltime">Net since start: <span class="mono tabular" id="allTimeEl">0</span></div>
+    </div>
+  </header>
+
+  <main>
+
+    <div class="view active" id="todayView" data-view="today">
+      <section class="section">
+        <div class="section-head">
+          <span class="section-title">Today's activity</span>
+          <button type="button" class="add-link" data-action="toggle-activity" id="activityToggleBtn">Show (0)</button>
+        </div>
+        <div id="todayCompletionControl"></div>
+        <div id="activityLog" style="display:none;"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="section-title">Credits</span>
+          <button type="button" class="add-link" data-action="open-habit" data-type="good">+ Add credit</button>
+        </div>
+        <div id="goodList"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="section-title">Debits</span>
+          <button type="button" class="add-link loss-tone" data-action="open-habit" data-type="bad">+ Add debit</button>
+        </div>
+        <div id="badList"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="section-title">Bonus entries</span>
+          <button type="button" class="add-link bonus-tone" data-action="open-bonus">+ Add bonus</button>
+        </div>
+        <div id="bonusList"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="section-title">Success milestones</span>
+          <button type="button" class="add-link bonus-tone" data-action="open-milestone">+ Add milestone</button>
+        </div>
+        <div class="section-help">Awarded automatically when you reach the target number of successful tracked days in a row. Untracked days pause the streak; a tracked day below your success threshold resets it. Changes recalculate past awards immediately.</div>
+        <div id="milestoneList"></div>
+      </section>
+    </div>
+
+    <div class="view" id="insightsView" data-view="insights">
+      <details class="section insight-section" open>
+        <summary>
+          <span class="insight-summary-main"><span class="insight-chevron" aria-hidden="true">›</span><span class="section-title">History</span></span>
+          <span class="history-rate mono" id="historyRateEl"></span>
+        </summary>
+        <div class="insight-body">
+          <div id="historyAverages"></div>
+          <div class="range-select" id="rangeSelect"></div>
+          <div class="date-jump">
+            <div>
+              <label for="historyDateInput">Open exact date</label>
+              <input id="historyDateInput" type="date">
+            </div>
+            <button type="button" data-action="jump-date">Open day</button>
+            <div class="date-jump-status" id="dateJumpStatus" role="status" aria-live="polite"></div>
+          </div>
+          <div class="history-chart-wrap" id="historyChartWrap">
+            <div class="history-chart" id="historyChart"></div>
+          </div>
+        </div>
+      </details>
+
+      <details class="section insight-section" open>
+        <summary><span class="insight-summary-main"><span class="insight-chevron" aria-hidden="true">›</span><span class="section-title">Since-start stats</span></span></summary>
+        <div class="insight-body">
+          <div class="stats-grid" id="statsGrid"></div>
+          <div id="topContributors"></div>
+        </div>
+      </details>
+
+      <details class="section insight-section" open>
+        <summary><span class="insight-summary-main"><span class="insight-chevron" aria-hidden="true">›</span><span class="section-title">Trends</span></span></summary>
+        <div class="insight-body"><div id="trendsBody"></div></div>
+      </details>
+    </div>
+
+    <div class="view" id="manageView" data-view="manage">
+      <section class="section">
+        <div class="section-head"><span class="section-title">Private cloud</span></div>
+        <div class="manage-card">
+          <div class="storage-detail" id="cloudStatusEl" aria-live="polite"><strong>Checking encrypted sync…</strong></div>
+          <button type="button" class="manage-row" id="cloudSyncBtn" data-action="sync-now">
+            <span class="manage-copy"><span class="manage-title">Sync now</span><span class="manage-sub">Safely reconcile this device with your encrypted cloud ledger.</span></span>
+            <span class="manage-arrow" aria-hidden="true">↻</span>
+          </button>
+          <button type="button" class="manage-row" data-action="open-account">
+            <span class="manage-copy"><span class="manage-title">Account security</span><span class="manage-sub">Change your password and revoke other sessions.</span></span>
+            <span class="manage-arrow" aria-hidden="true">›</span>
+          </button>
+          <button type="button" class="manage-row danger" data-action="sign-out-clear">
+            <span class="manage-copy"><span class="manage-title">Sign out &amp; remove device copy</span><span class="manage-sub">Syncs first, then removes the plaintext on-device cache from this browser.</span></span>
+          </button>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><span class="section-title">Settings &amp; data</span></div>
+        <div class="manage-card">
+          <button type="button" class="manage-row" data-action="open-settings">
+            <span class="manage-copy"><span class="manage-title">Scoring, start date &amp; day boundary</span><span class="manage-sub">Choose when statistics begin, your scoring rules, and when a ledger day rolls over.</span></span>
+            <span class="manage-arrow" aria-hidden="true">›</span>
+          </button>
+          <button type="button" class="manage-row" data-action="open-backup">
+            <span class="manage-copy"><span class="manage-title">Backup &amp; restore</span><span class="manage-sub" id="backupDateEl">Checking backup history…</span></span>
+            <span class="manage-arrow" aria-hidden="true">›</span>
+          </button>
+          <button type="button" class="manage-row" data-action="download-csv">
+            <span class="manage-copy"><span class="manage-title">Export activity as CSV</span><span class="manage-sub">Spreadsheet copy of every logged entry. This analysis export is not a backup.</span></span>
+            <span class="manage-arrow" aria-hidden="true">↓</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><span class="section-title">Storage</span></div>
+        <div class="manage-card">
+          <div class="storage-detail" id="storageStatusEl" aria-live="polite"><strong>Checking storage…</strong></div>
+          <button type="button" class="manage-row" id="storageCheckBtn" data-action="run-storage-check">
+            <span class="manage-copy"><span class="manage-title">Run storage health check</span><span class="manage-sub" id="storageHealthEl">Verifies a harmless write, read, and cleanup without changing your ledger.</span></span>
+            <span class="manage-arrow" aria-hidden="true">›</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><span class="section-title">Reset</span></div>
+        <div class="manage-card">
+          <div class="storage-detail" id="resetPreviewEl" aria-live="polite"></div>
+          <button type="button" class="manage-row danger" data-action="clear-ledger">
+            <span class="manage-copy"><span class="manage-title">Clear ledger &amp; milestones</span><span class="manage-sub">Removes habits, bonus entries, milestones, completed-day marks, and logged activity. Settings stay unchanged.</span></span>
+          </button>
+          <button type="button" class="manage-row danger" data-action="reset-settings">
+            <span class="manage-copy"><span class="manage-title">Reset settings</span><span class="manage-sub">Returns scoring, start date, day boundary, and chart range to defaults.</span></span>
+          </button>
+        </div>
+      </section>
+    </div>
+
+  </main>
+
+  <div class="toast" id="undoToast">
+    <span class="mono" id="undoToastText"></span>
+    <button type="button" data-action="undo">Undo</button>
+  </div>
+
+</div>
+
+<nav class="bottom-nav" aria-label="Primary">
+  <button type="button" class="nav-btn active" data-action="switch-view" data-view="today" aria-current="page"><span aria-hidden="true">✓</span>Today</button>
+  <button type="button" class="nav-btn" data-action="switch-view" data-view="insights"><span aria-hidden="true">↗</span>Insights</button>
+  <button type="button" class="nav-btn" data-action="switch-view" data-view="manage"><span aria-hidden="true">⚙</span>Data</button>
+</nav>
+
+<!-- Habit modal -->
+<div class="overlay" id="habitOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="habitModalTitle">
+    <h2 id="habitModalTitle">Add credit</h2>
+    <div class="field">
+      <span class="sr-only" id="habitTypeLabel">Type</span>
+      <div class="segmented" id="typeSeg" role="group" aria-labelledby="habitTypeLabel">
+        <button type="button" id="segGood" data-action="set-habit-type" data-type="good">Credit (+)</button>
+        <button type="button" id="segBad" data-action="set-habit-type" data-type="bad">Debit (−)</button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="habitName">Name</label>
+      <input id="habitName" type="text" placeholder="e.g. Morning workout" maxlength="60">
+    </div>
+    <div class="field">
+      <label id="pointsLabel" for="habitPoints">Points</label>
+      <input id="habitPoints" type="number" inputmode="numeric" min="1" max="999" placeholder="10">
+      <div class="hint" id="habitHint">Credits scale up the longer your streak runs — up to 2× at a 21-day streak.</div>
+      <div class="field-error" id="habitError" role="alert"></div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn danger" id="deleteHabitBtn" style="display:none" data-action="delete-habit">Delete</button>
+      <button type="button" class="btn ghost" data-action="close-habit">Cancel</button>
+      <button type="button" class="btn primary" data-action="save-habit">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div class="overlay" id="settingsOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <h2 id="settingsTitle">Settings</h2>
+    <div class="field">
+      <label for="baseInput">Daily base value</label>
+      <input id="baseInput" type="number" inputmode="numeric" min="0" max="9999" placeholder="100">
+      <div class="hint">Every day starts at this number. Credits, debits, and bonuses move you up or down from here. Set it to 0 if you'd rather just track a running total instead of a daily reset.</div>
+    </div>
+    <div class="field">
+      <label for="dayStartInput">Day starts at</label>
+      <select id="dayStartInput"></select>
+      <div class="hint">Your ledger day runs from this time until this time the next day. Stay up past midnight? Set this to whenever you actually call it a night — that way a late night doesn't spill into "tomorrow" and reset your score early.</div>
+    </div>
+    <div class="field">
+      <label for="startDateInput">Statistics start date</label>
+      <input id="startDateInput" type="date">
+      <div class="hint">Charts, averages, success statistics, contributors, trends, projections, streaks, and milestone awards ignore earlier activity. Untracked days remain unknown and are excluded from calculations.</div>
+    </div>
+    <div class="field">
+      <label for="thresholdInput">Success threshold</label>
+      <input id="thresholdInput" type="number" inputmode="numeric" min="0" max="9999" placeholder="80">
+      <div class="hint">Days that end at or above this score count as a success, shown live on today's score and across your history. Getting too many successes? Raise it. Too few? Lower it — past days get recalculated too, so you can see how the new bar would've looked.</div>
+      <div class="field-error" id="settingsError" role="alert"></div>
+    </div>
+    <div class="field">
+      <label for="reminderInput">Backup reminder</label>
+      <select id="reminderInput">
+        <option value="0">Off</option>
+        <option value="1">Every day</option>
+        <option value="3">Every 3 days</option>
+        <option value="7">Every week</option>
+        <option value="14">Every 2 weeks</option>
+        <option value="30">Every 30 days</option>
+      </select>
+      <div class="hint">Shows a gentle banner at the top when it's been this long since your last saved backup. This is a banner only — never a system notification — and this cadence stays on this device. Backups aren't automatic, so this is your nudge to save one.</div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn ghost" data-action="close-settings">Cancel</button>
+      <button type="button" class="btn primary" data-action="save-settings">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bonus modal -->
+<div class="overlay" id="bonusOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bonusModalTitle">
+    <h2 id="bonusModalTitle">Add bonus entry</h2>
+    <div class="field">
+      <label for="bonusName">Name</label>
+      <input id="bonusName" type="text" placeholder="e.g. Ran a 5K" maxlength="60">
+    </div>
+    <div class="field">
+      <label for="bonusPoints">Points</label>
+      <input id="bonusPoints" type="number" inputmode="numeric" min="1" max="999" placeholder="20">
+      <div class="hint">Tap it any time you earn it — no streak, just a one-off award. Log it as many times as it happens.</div>
+      <div class="field-error" id="bonusError" role="alert"></div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn danger" id="deleteBonusBtn" style="display:none" data-action="delete-bonus">Delete</button>
+      <button type="button" class="btn ghost" data-action="close-bonus">Cancel</button>
+      <button type="button" class="btn primary" data-action="save-bonus">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Milestone modal -->
+<div class="overlay" id="milestoneOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="milestoneModalTitle">
+    <h2 id="milestoneModalTitle">Add success milestone</h2>
+    <div class="field">
+      <label for="milestoneName">Name</label>
+      <input id="milestoneName" type="text" placeholder="e.g. 7-Day Streak" maxlength="60">
+    </div>
+    <div class="field">
+      <label for="milestoneDays">Consecutive successful days</label>
+      <input id="milestoneDays" type="number" inputmode="numeric" min="1" max="100000" placeholder="7">
+      <div class="hint">Award once when a streak reaches exactly this many successful tracked days. Untracked days pause the streak; a tracked day below your threshold resets it. The milestone can be earned again after a reset.</div>
+    </div>
+    <div class="field">
+      <label for="milestonePoints">Reward points</label>
+      <input id="milestonePoints" type="number" inputmode="numeric" min="1" max="9999" placeholder="100">
+    </div>
+    <div class="field">
+      <label for="milestoneDescription">Description <span class="sr-only">(optional)</span></label>
+      <textarea id="milestoneDescription" maxlength="160" placeholder="e.g. Completed a full week streak."></textarea>
+      <div class="hint">Optional · 160 characters maximum. Saving or deleting a milestone retroactively recalculates every affected day.</div>
+      <div class="field-error" id="milestoneError" role="alert"></div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn danger" id="deleteMilestoneBtn" style="display:none" data-action="delete-milestone">Delete</button>
+      <button type="button" class="btn ghost" data-action="close-milestone">Cancel</button>
+      <button type="button" class="btn primary" data-action="save-milestone">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Backup modal -->
+<div class="overlay" id="backupOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backupTitle">
+    <h2 id="backupTitle">Backup &amp; restore</h2>
+    <div class="backup-last" id="backupLastEl"></div>
+    <button type="button" class="btn primary" style="width:100%;margin:-6px 0 4px" data-action="export-files">Export to Files (JSON)</button>
+    <div class="hint" style="margin-bottom:16px">One tap opens the share sheet — choose <strong>Save to Files</strong> to drop a dated backup into iCloud Drive. Do this regularly; it's your only copy off this device.</div>
+    <div class="field backup-format">
+      <label class="backup-format-title" for="backupText">Complete JSON backup</label>
+      <textarea class="backup-text mono" id="backupText" readonly></textarea>
+      <div class="backup-tools">
+        <button type="button" class="btn ghost" data-action="download-backup">Save JSON</button>
+        <button type="button" class="btn ghost" id="shareBackupBtn" data-action="share-backup">Share JSON</button>
+      </div>
+      <label class="file-picker spaced">Choose JSON backup<input id="restoreFileInput" type="file" accept=".json,application/json"></label>
+      <label class="sr-only" for="restoreText">Paste JSON backup</label>
+      <textarea class="backup-text mono" id="restoreText" placeholder="Paste backup JSON here to restore or merge it"></textarea>
+      <div class="backup-tools">
+        <button type="button" class="btn ghost" data-action="merge">Merge JSON</button>
+        <button type="button" class="btn primary" data-action="restore">Restore JSON</button>
+      </div>
+      <div class="hint">Restore replaces your ledger. Merge adds anything new without touching your existing items or settings — use it to combine a backup from another device.</div>
+    </div>
+    <div class="field backup-format">
+      <span class="backup-format-title">Complete CSV backup</span>
+      <div class="hint">A restorable CSV containing settings, habits, bonus definitions, milestones, completed-day marks, and every logged entry. Automatic awards are regenerated from those source records. The separate activity CSV remains optimized for spreadsheets.</div>
+      <div class="backup-tools">
+        <button type="button" class="btn ghost" data-action="download-csv-backup">Save CSV</button>
+        <label class="file-picker">Choose CSV<input id="csvRestoreFileInput" type="file" accept=".csv,text/csv"></label>
+      </div>
+      <div class="backup-tools">
+        <button type="button" class="btn ghost" id="mergeCsvBtn" data-action="merge-csv" disabled>Merge selected CSV</button>
+        <button type="button" class="btn primary" id="restoreCsvBtn" data-action="restore-csv" disabled>Restore selected CSV</button>
+      </div>
+    </div>
+    <div class="hint">Every backup is validated in full before confirmation. Restoring replaces the current ledger after preserving a recovery snapshot.</div>
+    <div class="status-message" id="backupStatus" role="status" aria-live="polite"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn ghost" data-action="close-backup">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm modal (replaces native confirm(), which is unreliable in iOS home-screen apps) -->
+<div class="overlay" id="confirmOverlay">
+  <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+    <h2 id="confirmTitle">Confirm</h2>
+    <p class="confirm-message" id="confirmMessage"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn ghost" data-action="confirm-no">Cancel</button>
+      <button type="button" class="btn danger-solid" id="confirmActionBtn" data-action="confirm-yes">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Day activity modal -->
+<div class="overlay" id="dayOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dayModalTitle">
+    <h2 id="dayModalTitle">Day activity</h2>
+    <div class="day-summary" id="daySummary"></div>
+    <div class="day-nav" role="group" aria-label="Adjacent day navigation">
+      <button type="button" id="previousDayBtn" data-action="navigate-day" data-offset="-1">‹ Previous day</button>
+      <button type="button" id="nextDayBtn" data-action="navigate-day" data-offset="1">Next day ›</button>
+    </div>
+    <div class="day-nav tracked" role="group" aria-label="Tracked day navigation">
+      <button type="button" id="previousTrackedBtn" data-action="navigate-tracked" data-direction="-1">‹ Previous tracked</button>
+      <button type="button" id="nextTrackedBtn" data-action="navigate-tracked" data-direction="1">Next tracked ›</button>
+    </div>
+    <button type="button" class="btn ghost" style="width:100%;margin-bottom:12px" data-action="add-day-entry">+ Add entry to this day</button>
+    <div class="day-activity" id="dayActivityList"></div>
+    <div id="dayCompletionControl"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn ghost" data-action="close-day">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit logged entry modal -->
+<div class="overlay" id="entryOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="entryModalTitle">
+    <h2 id="entryModalTitle">Edit logged entry</h2>
+    <div class="field">
+      <label for="entryDateInput">Ledger date</label>
+      <input id="entryDateInput" type="date">
+    </div>
+    <div class="field">
+      <label for="entryNameInput">Name</label>
+      <input id="entryNameInput" type="text" maxlength="60">
+    </div>
+    <div class="field">
+      <label for="entryTypeInput">Type</label>
+      <select id="entryTypeInput">
+        <option value="good">Credit (+)</option>
+        <option value="bad">Debit (−)</option>
+        <option value="bonus">Bonus (+)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="entryPointsInput">Points</label>
+      <input id="entryPointsInput" type="number" inputmode="numeric" min="0" max="9999">
+      <div class="hint">Enter the magnitude only; debits are stored as negative automatically.</div>
+      <div class="field-error" id="entryError" role="alert"></div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn ghost" data-action="close-entry">Cancel</button>
+      <button type="button" class="btn primary" data-action="save-entry">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<script src="/tally.js" defer></script>
+</body>
+</html>
