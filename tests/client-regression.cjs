@@ -154,6 +154,22 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   const d2 = window.addDaysToKey(today, -1);
   const d3 = today;
 
+  const startupDateState = window.eval(`{
+    const savedHour = dayStartHour;
+    const savedStart = trackingStartDate;
+    const savedView = todayViewDate;
+    dayStartHour = 4;
+    trackingStartDate = addDaysToKey(todayKey(), -30);
+    todayViewDate = null;
+    const expected = todayKey();
+    const actual = activeLedgerDate();
+    dayStartHour = savedHour;
+    trackingStartDate = savedStart;
+    todayViewDate = savedView;
+    ({ expected, actual });
+  }`);
+  eq(startupDateState.actual, startupDateState.expected, 'Today opens on the current configured ledger day instead of the tracking start date');
+
   window.eval(`
     trackingStartDate = addDaysToKey('${today}', -20);
     entries = Array.from({ length:20 }, (_, index) => {

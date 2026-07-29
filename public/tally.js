@@ -96,8 +96,9 @@ function isInStatsWindow(date, end = todayKey()){
 function activeLedgerDate(){
   const start = statsStartKey();
   const end = todayKey();
-  if(!isValidDateKey(todayViewDate) || todayViewDate < start) todayViewDate = start;
-  if(todayViewDate > end) todayViewDate = end;
+  if(!isValidDateKey(todayViewDate)) todayViewDate = end;
+  else if(todayViewDate < start) todayViewDate = start;
+  else if(todayViewDate > end) todayViewDate = end;
   return todayViewDate;
 }
 function inferredStartDate(candidateEntries, hour = dayStartHour){
