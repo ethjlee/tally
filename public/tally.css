@@ -311,7 +311,7 @@
     font-size:16px; padding:0; width:44px; height:44px;
   }
   .edit-btn:hover, .edit-btn:focus-visible{ opacity:1; }
-  .task-group{ margin-top:10px; border:1px solid var(--line); border-radius:12px; overflow:hidden; background:rgba(255,255,255,.012); }
+  .task-group{ position:relative; margin-top:10px; border:1px solid var(--line); border-radius:12px; overflow:hidden; background:rgba(255,255,255,.012); }
   .task-group:first-child{ margin-top:8px; }
   .task-group-head{
     min-height:38px; padding:7px 8px 7px 13px; display:flex; align-items:center; gap:8px;
@@ -338,9 +338,16 @@
     content:""; position:absolute; left:0; right:0; height:3px; border-radius:999px;
     background:var(--gain); z-index:2;
   }
+  .task-group.drop-before::before, .task-group.drop-after::after{
+    content:""; position:absolute; left:0; right:0; height:3px;
+    background:var(--gain); z-index:3;
+  }
   .task-row.drop-before::before{ top:-2px; }
   .task-row.drop-after::after{ bottom:-2px; }
+  .task-group.drop-before::before{ top:0; }
+  .task-group.drop-after::after{ bottom:0; }
   .task-row.drag-source{ opacity:.22; }
+  .task-group.drag-source{ opacity:.3; }
   .drag-handle{
     flex:none; width:44px; height:44px; padding:0; display:grid; place-items:center;
     border:0; border-radius:9px; background:transparent; color:var(--muted);

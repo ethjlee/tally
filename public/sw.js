@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "tally-shell-v4";
+const CACHE_NAME = "tally-shell-v5";
 const SHELL_ASSETS = [
   "/tally.html",
   "/tally.css",

@@ -43,11 +43,14 @@ const bonusTask = bonusTaskV4.extend({
   sectionId: id.nullable()
 }).strict();
 
-const taskSection = z.object({
+const taskSectionV5 = z.object({
   id,
   name: z.string().trim().min(1).max(40),
   kind: z.enum(["good", "bad", "bonus"]),
   order: z.number().int().min(0).max(1_000_000)
+}).strict();
+const taskSection = taskSectionV5.extend({
+  kind: z.enum(["habit", "bonus"])
 }).strict();
 
 const milestone = z.object({
@@ -107,9 +110,9 @@ const dataShape = {
   completedDays: z.array(completedDay).max(100_000),
   entries: z.array(entry).max(100_000)
 };
-const validateCollections = (
+const validateCollections = (sectionMode: "topic" | "legacy") => (
   value: {
-    taskSections?: Array<{ id: string; kind: "good" | "bad" | "bonus" }>;
+    taskSections?: Array<{ id: string; kind: "habit" | "good" | "bad" | "bonus" }>;
     habits: Array<{ id: string; type?: "good" | "bad"; sectionId?: string | null }>;
     bonusTasks: Array<{ id: string; sectionId?: string | null }>;
     milestones: Array<{ id: string }>;
@@ -127,7 +130,8 @@ const validateCollections = (
   uniqueBy(value.entries, (item) => item.id, context, "Entries");
   const sections = new Map((value.taskSections || []).map(section => [section.id, section.kind]));
   value.habits.forEach((habit, index) => {
-    if (habit.sectionId && sections.get(habit.sectionId) !== habit.type) {
+    const expectedKind = sectionMode === "topic" ? "habit" : habit.type;
+    if (habit.sectionId && sections.get(habit.sectionId) !== expectedKind) {
       context.addIssue({ code: "custom", message: `Habit ${index + 1} references an incompatible task section.` });
     }
   });
@@ -137,9 +141,9 @@ const validateCollections = (
     }
   });
 };
-const data = z.object(dataShape).strict().superRefine(validateCollections);
+const data = z.object(dataShape).strict().superRefine(validateCollections("topic"));
 
-const settings = z.object({
+const settingsBase = z.object({
   dailyBase: z.number().int().min(0).max(9_999),
   successThreshold: z.number().int().min(0).max(9_999),
   dayStartHour: z.number().int().min(0).max(23),
@@ -152,17 +156,34 @@ const settings = z.object({
     z.literal(90),
     z.literal("all")
   ]),
-  backupReminderDays: z.number().int().min(0).max(366),
+  backupReminderDays: z.number().int().min(0).max(366)
+}).strict();
+const taskSortMode = z.enum([
+  "manual",
+  "name-asc",
+  "name-desc",
+  "usage-desc",
+  "usage-asc",
+  "points-desc",
+  "points-asc"
+]);
+const settings = settingsBase.extend({
   taskSortModes: z.object({
-    good: z.enum(["manual", "name-asc", "name-desc", "usage-desc", "usage-asc", "points-desc", "points-asc"]),
-    bad: z.enum(["manual", "name-asc", "name-desc", "usage-desc", "usage-asc", "points-desc", "points-asc"]),
-    bonus: z.enum(["manual", "name-asc", "name-desc", "usage-desc", "usage-asc", "points-desc", "points-asc"])
+    habit: taskSortMode,
+    bonus: taskSortMode
+  }).strict()
+}).strict();
+const settingsV5 = settingsBase.extend({
+  taskSortModes: z.object({
+    good: taskSortMode,
+    bad: taskSortMode,
+    bonus: taskSortMode
   }).strict()
 }).strict();
 
-const snapshotV5Schema = z.object({
+const snapshotV6Schema = z.object({
   app: z.literal("Tally"),
-  schemaVersion: z.literal(5),
+  schemaVersion: z.literal(6),
   savedAt: isoTimestamp.optional(),
   revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   writerId: id.nullable().optional(),
@@ -171,14 +192,32 @@ const snapshotV5Schema = z.object({
 }).strict();
 
 // Rolling deployment compatibility: accept both earlier encrypted cloud
-// snapshots so a new client can load them and write schema 5 without downtime.
+// snapshots so a new client can load them and write schema 6 without downtime.
+const legacyDataV5 = z.object({
+  taskSections: z.array(taskSectionV5).max(1_000),
+  habits: z.array(habit).max(1_000),
+  bonusTasks: z.array(bonusTask).max(1_000),
+  milestones: z.array(milestone).max(1_000),
+  completedDays: z.array(completedDay).max(100_000),
+  entries: z.array(entry).max(100_000)
+}).strict().superRefine(validateCollections("legacy"));
+const snapshotV5Schema = z.object({
+  app: z.literal("Tally"),
+  schemaVersion: z.literal(5),
+  savedAt: isoTimestamp.optional(),
+  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  writerId: id.nullable().optional(),
+  data: legacyDataV5,
+  settings: settingsV5
+}).strict();
+
 const legacyDataV4 = z.object({
   habits: z.array(habitV4).max(1_000),
   bonusTasks: z.array(bonusTaskV4).max(1_000),
   milestones: z.array(milestone).max(1_000),
   completedDays: z.array(completedDay).max(100_000),
   entries: z.array(entry).max(100_000)
-}).strict().superRefine(validateCollections);
+}).strict().superRefine(validateCollections("legacy"));
 const snapshotV4Schema = z.object({
   app: z.literal("Tally"),
   schemaVersion: z.literal(4),
@@ -186,7 +225,7 @@ const snapshotV4Schema = z.object({
   revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   writerId: id.nullable().optional(),
   data: legacyDataV4,
-  settings
+  settings: settingsV5
 }).strict();
 
 const legacyHabitV3 = habitV4.omit({ order: true });
@@ -197,8 +236,8 @@ const legacyDataV3 = z.object({
   milestones: z.array(milestone).max(1_000),
   completedDays: z.array(completedDay).max(100_000),
   entries: z.array(entry).max(100_000)
-}).strict().superRefine(validateCollections);
-const legacySettingsV3 = settings.omit({ taskSortModes: true });
+}).strict().superRefine(validateCollections("legacy"));
+const legacySettingsV3 = settingsV5.omit({ taskSortModes: true });
 const snapshotV3Schema = z.object({
   app: z.literal("Tally"),
   schemaVersion: z.literal(3),
@@ -209,7 +248,7 @@ const snapshotV3Schema = z.object({
   settings: legacySettingsV3
 }).strict();
 
-export const snapshotSchema = z.union([snapshotV5Schema, snapshotV4Schema, snapshotV3Schema]);
+export const snapshotSchema = z.union([snapshotV6Schema, snapshotV5Schema, snapshotV4Schema, snapshotV3Schema]);
 
 export const syncPutSchema = z.object({
   baseRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),

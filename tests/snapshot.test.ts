@@ -5,7 +5,7 @@ import { parseSnapshot, syncPutSchema } from "../lib/snapshot";
 function validSnapshot() {
   return {
     app: "Tally" as const,
-    schemaVersion: 5 as const,
+    schemaVersion: 6 as const,
     savedAt: "2026-07-29T12:00:00.000Z",
     revision: 4,
     writerId: "device_1",
@@ -14,7 +14,7 @@ function validSnapshot() {
         {
           id: "section_1",
           name: "Daily wear",
-          kind: "good" as const,
+          kind: "habit" as const,
           order: 0
         }
       ],
@@ -64,8 +64,7 @@ function validSnapshot() {
       historyRangeDays: 30 as const,
       backupReminderDays: 14,
       taskSortModes: {
-        good: "manual" as const,
-        bad: "usage-desc" as const,
+        habit: "usage-desc" as const,
         bonus: "name-asc" as const
       }
     }
@@ -74,18 +73,28 @@ function validSnapshot() {
 
 test("server accepts the complete current ledger schema", () => {
   const parsed = parseSnapshot(validSnapshot());
-  assert.equal(parsed.schemaVersion, 5);
-  if (parsed.schemaVersion !== 5) throw new Error("Expected current schema");
+  assert.equal(parsed.schemaVersion, 6);
+  if (parsed.schemaVersion !== 6) throw new Error("Expected current schema");
   assert.equal(parsed.settings.backupReminderDays, 14);
-  assert.equal(parsed.settings.taskSortModes.bad, "usage-desc");
+  assert.equal(parsed.settings.taskSortModes.habit, "usage-desc");
   assert.equal(parsed.data.habits[0].order, 0);
   assert.equal(parsed.data.habits[0].sectionId, "section_1");
-  assert.equal(parsed.data.taskSections[0].kind, "good");
+  assert.equal(parsed.data.taskSections[0].kind, "habit");
   assert.equal(parsed.data.milestones.length, 1);
 });
 
-test("server accepts deployed version-4 and version-3 snapshots during rolling upgrade", () => {
-  const legacyV4: any = structuredClone(validSnapshot());
+test("server accepts deployed version-5, version-4, and version-3 snapshots during rolling upgrade", () => {
+  const legacyV5: any = structuredClone(validSnapshot());
+  legacyV5.schemaVersion = 5;
+  legacyV5.data.taskSections[0].kind = "good";
+  legacyV5.settings.taskSortModes = {
+    good: "manual",
+    bad: "usage-desc",
+    bonus: "name-asc"
+  };
+  assert.equal(parseSnapshot(legacyV5).schemaVersion, 5);
+
+  const legacyV4: any = structuredClone(legacyV5);
   legacyV4.schemaVersion = 4;
   delete legacyV4.data.taskSections;
   legacyV4.data.habits.forEach((item: any) => delete item.sectionId);
@@ -135,11 +144,11 @@ test("server rejects wrong point signs and unknown fields", () => {
   assert.throws(() => parseSnapshot(withUnknown));
 
   const invalidSort: any = validSnapshot();
-  invalidSort.settings.taskSortModes.good = "random";
+  invalidSort.settings.taskSortModes.habit = "random";
   assert.throws(() => parseSnapshot(invalidSort));
 
   const incompatibleSection: any = validSnapshot();
-  incompatibleSection.data.taskSections[0].kind = "bad";
+  incompatibleSection.data.taskSections[0].kind = "bonus";
   assert.throws(() => parseSnapshot(incompatibleSection));
 });
 

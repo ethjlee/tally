@@ -77,6 +77,7 @@ const dom = new JSDOM(html, {
       removeEventListener() {}
     });
     window.scrollTo = () => {};
+    window.scrollBy = () => {};
     Object.defineProperty(window.navigator, 'storage', {
       configurable: true,
       value: {
@@ -135,7 +136,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
       taskSections = [];
       habits = [];
       bonusTasks = [];
-      taskSortModes = { good:'manual', bad:'manual', bonus:'manual' };
+      taskSortModes = { habit:'manual', bonus:'manual' };
       todayViewDate = todayKey();
       recomputeAllHabitStreaks();
     }
@@ -196,9 +197,9 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   eq(window.eval(`entries.filter(entry => entry.habitId === 'fixed_credit').every(entry => entry.points === 10)`), true, 'Repeated same-day credit taps remain fixed');
   window.logHabit('fixed_debit');
   eq(window.eval(`entries.find(entry => entry.habitId === 'fixed_debit').points`), -7, 'Debit points remain fixed and negative');
-  ok(window.document.getElementById('goodList').textContent.includes('🔥 21-day streak'), 'Informational habit streak remains visible');
-  ok(!/·\s*×\d+\.\d+/.test(window.document.getElementById('goodList').textContent), 'Multiplier label is absent from the habit UI');
-  eq(window.document.querySelector('#goodList .pill').textContent, '+10', 'Credit pill shows configured points');
+  ok(window.document.getElementById('habitList').textContent.includes('🔥 21-day streak'), 'Informational habit streak remains visible');
+  ok(!/·\s*×\d+\.\d+/.test(window.document.getElementById('habitList').textContent), 'Multiplier label is absent from the habit UI');
+  eq(window.document.querySelector('#habitList .pill').textContent, '+10', 'Credit pill shows configured points');
 
   window.eval(`
     trackingStartDate = '${d1}';
@@ -220,44 +221,51 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
     ];
     completedDays = [];
     milestones = [];
-    taskSortModes = { good:'manual', bad:'manual', bonus:'manual' };
+    taskSortModes = { habit:'manual', bonus:'manual' };
     renderAll();
   `);
-  const visibleCreditNames = () => [...window.document.querySelectorAll('#goodList .row-name')].map(node => node.textContent);
-  eq(JSON.stringify(visibleCreditNames()), JSON.stringify(['Zulu','Alpha','Mike']), 'Manual sorting preserves explicit task order');
-  window.setTaskSortMode('good', 'name-asc');
-  eq(JSON.stringify(visibleCreditNames()), JSON.stringify(['Alpha','Mike','Zulu']), 'A-to-Z task sorting works');
-  window.setTaskSortMode('good', 'usage-desc');
-  eq(JSON.stringify(visibleCreditNames()), JSON.stringify(['Mike','Alpha','Zulu']), 'Most-used task sorting uses linked history');
-  window.setTaskSortMode('good', 'manual');
-  window.moveTaskToPosition('good', 'sort_z', null, 'sort_m');
-  eq(JSON.stringify(visibleCreditNames()), JSON.stringify(['Alpha','Zulu','Mike']), 'Manual move changes and rerenders stored task order');
-  eq(window.document.querySelectorAll('#goodList .drag-handle').length, 3, 'Every credit has one six-dot drag handle');
-  eq(window.document.querySelectorAll('#goodList .drag-handle circle').length, 18, 'Drag handles render the requested six-dot grip');
-  eq(window.document.querySelectorAll('#goodList .order-btn').length, 0, 'Old visible arrow controls are removed');
-  ok(window.document.querySelector('#goodList [data-task-row]').lastElementChild.classList.contains('drag-handle'), 'Drag handle is the rightmost row control');
-  window.setTaskSortMode('good', 'name-asc');
-  window.beginTaskDrag({ preventDefault() {}, pointerId:1 }, window.document.querySelector('#goodList .drag-handle'));
-  eq(window.eval(`taskSortModes.good`), 'manual', 'Touching a handle in automatic mode switches the list to Manual');
+  const visibleHabitNames = () => [...window.document.querySelectorAll('#habitList .row-name')].map(node => node.textContent);
+  eq(JSON.stringify(visibleHabitNames()), JSON.stringify(['Zulu','Alpha','Mike']), 'Manual sorting preserves explicit task order');
+  window.setTaskSortMode('habit', 'name-asc');
+  eq(JSON.stringify(visibleHabitNames()), JSON.stringify(['Alpha','Mike','Zulu']), 'A-to-Z task sorting works');
+  window.setTaskSortMode('habit', 'usage-desc');
+  eq(JSON.stringify(visibleHabitNames()), JSON.stringify(['Mike','Alpha','Zulu']), 'Most-used task sorting uses linked history');
+  window.setTaskSortMode('habit', 'manual');
+  window.moveTaskToPosition('habit', 'sort_z', null, 'sort_m');
+  eq(JSON.stringify(visibleHabitNames()), JSON.stringify(['Alpha','Zulu','Mike']), 'Manual move changes and rerenders stored task order');
+  eq(window.document.querySelectorAll('#habitList .drag-handle').length, 3, 'Every habit has one six-dot drag handle');
+  eq(window.document.querySelectorAll('#habitList .drag-handle circle').length, 18, 'Drag handles render the requested six-dot grip');
+  eq(window.document.querySelectorAll('#habitList .order-btn').length, 0, 'Old visible arrow controls are removed');
+  ok(window.document.querySelector('#habitList [data-task-row]').lastElementChild.classList.contains('drag-handle'), 'Drag handle is the rightmost row control');
+  window.setTaskSortMode('habit', 'name-asc');
+  window.beginTaskDrag({ preventDefault() {}, pointerId:1 }, window.document.querySelector('#habitList .drag-handle'));
+  eq(window.eval(`taskSortModes.habit`), 'manual', 'Touching a handle in automatic mode switches the list to Manual');
 
   window.eval(`
     taskSections = [
-      { id:'section_morning', name:'Morning', kind:'good', order:0 },
-      { id:'section_evening', name:'Evening', kind:'good', order:1 },
+      { id:'section_morning', name:'Morning', kind:'habit', order:0 },
+      { id:'section_evening', name:'Evening', kind:'habit', order:1 },
       { id:'section_bonus', name:'Special', kind:'bonus', order:0 }
     ];
     habits.find(item => item.id === 'sort_m').sectionId = 'section_morning';
     habits.find(item => item.id === 'sort_m').order = 0;
+    habits.push({ id:'topic_debit', name:'Late scrolling', type:'bad', points:5, streak:0, lastDate:null, order:0, sectionId:'section_evening' });
     renderAll();
   `);
-  window.moveTaskToPosition('good', 'sort_z', 'section_morning', 'sort_m');
+  ok(Boolean(window.document.querySelector('#habitList [data-task-group][data-section-id=""]')), 'Unsorted appears while it contains habits');
+  eq(window.document.querySelectorAll('#habitList [data-section-drag-handle]').length, 2, 'Custom topics have drag handles');
+  eq(window.document.querySelectorAll('#habitList [data-section-drag-handle] circle').length, 12, 'Topic drag handles use the six-dot grip');
+  window.moveTaskToPosition('habit', 'sort_z', 'section_morning', 'sort_m');
   eq(window.eval(`habits.find(item => item.id === 'sort_z').sectionId`), 'section_morning', 'Drag core moves a credit into another credit section');
   eq(JSON.stringify([...window.document.querySelectorAll('[data-section-id="section_morning"] .row-name')].map(node => node.textContent)), JSON.stringify(['Zulu','Mike']), 'Cross-section move preserves the requested insertion position');
-  eq(window.moveTaskToPosition('good', 'sort_a', 'section_bonus', null), false, 'Credit cannot move into a bonus section');
-  window.moveTaskByKeyboard('good', 'sort_m', 'ArrowRight');
-  eq(window.eval(`habits.find(item => item.id === 'sort_m').sectionId`), 'section_evening', 'Keyboard handle can move a task to the next same-type section');
-  eq(window.moveTaskByKeyboard('good', 'sort_m', 'Home'), false, 'Keyboard Home is a no-op when a task is already first');
-  eq(window.moveTaskByKeyboard('good', 'sort_m', 'End'), false, 'Keyboard End is a no-op when a task is already last');
+  eq(window.moveTaskToPosition('habit', 'sort_a', 'section_bonus', null), false, 'Habit cannot move into a bonus section');
+  window.moveTaskByKeyboard('habit', 'sort_m', 'ArrowRight');
+  eq(window.eval(`habits.find(item => item.id === 'sort_m').sectionId`), 'section_evening', 'Keyboard handle can move a task to the next topic');
+  eq(window.eval(`habits.filter(item => item.sectionId === 'section_evening').map(item => item.type).sort().join(',')`), 'bad,good', 'One topic can contain both credits and debits');
+  eq(window.moveTaskByKeyboard('habit', 'sort_m', 'Home'), true, 'Keyboard Home moves a credit ahead of a debit in the same topic');
+  eq(window.eval(`manualTaskItems('habit', 'section_evening')[0].id`), 'sort_m', 'Keyboard Home places the habit first');
+  eq(window.moveTaskByKeyboard('habit', 'sort_m', 'End'), true, 'Keyboard End moves a credit after a debit in the same topic');
+  eq(window.eval(`manualTaskItems('habit', 'section_evening').at(-1).id`), 'sort_m', 'Keyboard End places the habit last');
   const alphaHandle = window.document.querySelector('[data-drag-handle][data-id="sort_a"]');
   const morningDropZone = window.document.querySelector('[data-task-drop-zone][data-section-id="section_morning"]');
   const originalElementFromPoint = window.document.elementFromPoint;
@@ -268,15 +276,33 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   window.document.elementFromPoint = originalElementFromPoint;
   eq(window.eval(`habits.find(item => item.id === 'sort_a').sectionId`), 'section_morning', 'Pointer drag lifecycle moves a task into the drop-target section');
   eq(window.document.querySelectorAll('.task-drag-ghost').length, 0, 'Pointer drag cleans up its floating preview');
-  window.setTaskSortMode('good', 'name-asc');
+  eq(window.document.querySelector('#habitList [data-task-group][data-section-id=""]'), null, 'Empty Unsorted group disappears');
+  window.moveTaskToPosition('habit', 'sort_a', null, null);
+  ok(Boolean(window.document.querySelector('#habitList [data-task-group][data-section-id=""]')), 'Unsorted reappears when a habit is moved into it');
+  window.moveTaskToPosition('habit', 'sort_a', 'section_morning', null);
+
+  const eveningSectionHandle = window.document.querySelector('[data-section-drag-handle][data-id="section_evening"]');
+  const morningSectionGroup = window.document.querySelector('[data-task-group][data-section-id="section_morning"]');
+  window.document.elementFromPoint = () => morningSectionGroup;
+  window.beginTaskSectionDrag({ pointerId:43, clientX:10, clientY:10, preventDefault() {} }, eveningSectionHandle);
+  window.updateTaskSectionDrag({ pointerId:43, clientX:10, clientY:-10, preventDefault() {} });
+  window.finishTaskSectionDrag({ pointerId:43 });
+  window.document.elementFromPoint = originalElementFromPoint;
+  const visibleTopics = () => [...window.document.querySelectorAll('#habitList [data-task-group][data-custom-section="true"] .task-group-name')].map(node => node.textContent);
+  eq(JSON.stringify(visibleTopics()), JSON.stringify(['Evening','Morning']), 'Pointer drag reorders custom topics');
+  window.moveTaskSectionByKeyboard('habit', 'section_morning', 'Home');
+  eq(JSON.stringify(visibleTopics()), JSON.stringify(['Morning','Evening']), 'Keyboard topic handle reorders custom topics');
+  eq(window.document.querySelectorAll('.task-drag-ghost').length, 0, 'Section pointer drag cleans up its floating preview');
+
+  window.setTaskSortMode('habit', 'name-asc');
   eq(JSON.stringify([...window.document.querySelectorAll('[data-section-id="section_morning"] .row-name')].map(node => node.textContent)), JSON.stringify(['Alpha','Zulu']), 'Automatic sorting applies within each custom section');
   eq(window.eval(`habits.find(item => item.id === 'sort_a').sectionId`), 'section_morning', 'Automatic sorting does not change section membership');
-  window.setTaskSortMode('good', 'manual');
+  window.setTaskSortMode('habit', 'manual');
   window.openHabitModal('good', 'sort_a');
   ok([...window.document.getElementById('habitSectionInput').options].some(option => option.value === 'section_morning'), 'Edit modal offers section assignment as a fallback');
   window.closeHabitModal();
 
-  window.openTaskSectionModal('bad');
+  window.openTaskSectionModal('habit');
   window.document.getElementById('taskSectionName').value = 'Temporary';
   window.saveTaskSection();
   const temporarySectionId = window.eval(`taskSections.find(section => section.name === 'Temporary').id`);
@@ -284,12 +310,12 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
     habits.push({id:'temporary_debit',name:'Temporary debit',type:'bad',points:2,streak:0,lastDate:null,order:0,sectionId:'${temporarySectionId}'});
     renderAll();
   `);
-  window.openTaskSectionModal('bad', temporarySectionId);
+  window.openTaskSectionModal('habit', temporarySectionId);
   const deleteTemporarySection = window.deleteTaskSectionConfirm();
   window.resolveConfirm(true);
   await deleteTemporarySection;
   eq(window.eval(`taskSections.some(section => section.id === '${temporarySectionId}')`), false, 'Custom section can be deleted');
-  eq(window.eval(`habits.find(item => item.id === 'temporary_debit').sectionId`), null, 'Deleting a section moves its tasks to Unsectioned');
+  eq(window.eval(`habits.find(item => item.id === 'temporary_debit').sectionId`), null, 'Deleting a topic moves its habits to Unsorted');
   window.eval(`habits = habits.filter(item => item.id !== 'temporary_debit'); renderAll();`);
 
   window.setTaskSortMode('bonus', 'points-asc');
@@ -303,7 +329,45 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   eq(sortedCsvBackup.taskSections.length, 3, 'Complete CSV preserves custom task sections');
   eq(sortedCsvBackup.habits.find(item => item.id === 'sort_z').sectionId, 'section_morning', 'Complete CSV preserves task section assignment');
   eq(sortedCsvBackup.habits.find(item => item.id === 'sort_z').order, 0, 'Complete CSV preserves manual task order within its section');
-  const legacyV4JsonBackup = JSON.parse(JSON.stringify(window.buildExport()));
+
+  const legacyV5JsonBackup = JSON.parse(JSON.stringify(window.buildExport()));
+  legacyV5JsonBackup.schemaVersion = 5;
+  legacyV5JsonBackup.data.taskSections = [
+    { id:'legacy_good_morning', name:'Morning', kind:'good', order:0 },
+    { id:'legacy_bad_morning', name:'Morning', kind:'bad', order:0 },
+    { id:'legacy_bad_focus', name:'Focus', kind:'bad', order:1 },
+    { id:'legacy_bonus_special', name:'Special', kind:'bonus', order:0 }
+  ];
+  legacyV5JsonBackup.data.habits.find(item => item.id === 'sort_z').sectionId = 'legacy_good_morning';
+  legacyV5JsonBackup.data.habits.find(item => item.id === 'sort_a').sectionId = 'legacy_good_morning';
+  legacyV5JsonBackup.data.habits.find(item => item.id === 'sort_m').sectionId = 'legacy_good_morning';
+  legacyV5JsonBackup.data.habits.find(item => item.id === 'topic_debit').sectionId = 'legacy_bad_morning';
+  legacyV5JsonBackup.data.habits.push({
+    id:'legacy_focus_debit', name:'Distracted browsing', type:'bad', points:4,
+    streak:0, lastDate:null, order:0, sectionId:'legacy_bad_focus'
+  });
+  legacyV5JsonBackup.data.bonusTasks[0].sectionId = 'legacy_bonus_special';
+  legacyV5JsonBackup.settings.taskSortModes = {
+    good:'manual', bad:'usage-desc', bonus:'points-asc'
+  };
+  const migratedLegacyV5Json = window.validateBackupObject(legacyV5JsonBackup);
+  eq(migratedLegacyV5Json.habits.length, legacyV5JsonBackup.data.habits.length, 'Version-5 topic migration preserves every habit');
+  eq(migratedLegacyV5Json.taskSections.filter(item => item.kind === 'habit' && item.name === 'Morning').length, 1, 'Same-named Credit and Debit sections merge into one topic');
+  eq(
+    migratedLegacyV5Json.habits.find(item => item.id === 'sort_z').sectionId,
+    migratedLegacyV5Json.habits.find(item => item.id === 'topic_debit').sectionId,
+    'Merged topic preserves both former Credit and Debit assignments'
+  );
+  eq(
+    migratedLegacyV5Json.taskSections.find(item => item.id === migratedLegacyV5Json.habits.find(habit => habit.id === 'legacy_focus_debit').sectionId).name,
+    'Focus',
+    'Debit-only sections become topics with their assignments intact'
+  );
+  eq(migratedLegacyV5Json.taskSections.find(item => item.id === 'legacy_bonus_special').kind, 'bonus', 'Bonus sections remain separate during migration');
+  eq(migratedLegacyV5Json.bonusTasks[0].sectionId, 'legacy_bonus_special', 'Bonus section assignments remain intact');
+  eq(migratedLegacyV5Json.taskSortModes.habit, 'manual', 'Conflicting legacy Credit and Debit sort modes migrate safely to Manual');
+
+  const legacyV4JsonBackup = JSON.parse(JSON.stringify(legacyV5JsonBackup));
   legacyV4JsonBackup.schemaVersion = 4;
   delete legacyV4JsonBackup.data.taskSections;
   legacyV4JsonBackup.data.habits.forEach(item => delete item.sectionId);
@@ -317,17 +381,17 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   legacyJsonBackup.data.habits.forEach(item => delete item.order);
   legacyJsonBackup.data.bonusTasks.forEach(item => delete item.order);
   const migratedLegacyJson = window.validateBackupObject(legacyJsonBackup);
-  eq(migratedLegacyJson.taskSortModes.good, 'manual', 'Version-3 JSON migrates to manual sorting');
+  eq(migratedLegacyJson.taskSortModes.habit, 'manual', 'Version-3 JSON migrates to manual habit sorting');
   eq(migratedLegacyJson.habits.find(item => item.id === 'sort_z').order, 0, 'Version-3 JSON migrates visible array order');
 
-  window.eval(`todayViewDate = '${d2}'; taskSortModes.good = 'manual'; renderAll();`);
+  window.eval(`todayViewDate = '${d2}'; taskSortModes.habit = 'manual'; renderAll();`);
   window.logHabit('sort_a');
   window.logBonus('bonus_a');
   eq(window.eval(`entries.filter(entry => entry.date === '${d2}' && entry.habitId === 'sort_a').length`), 2, 'Front-page credit tap targets selected historical day');
   eq(window.eval(`entries.filter(entry => entry.date === '${d2}' && entry.bonusId === 'bonus_a').length`), 1, 'Front-page bonus tap targets selected historical day');
   eq(window.document.getElementById('todayDateCaption').textContent, 'Yesterday', 'Front-page navigator labels yesterday clearly');
   ok(window.document.getElementById('statusEl').textContent.includes('on this day'), 'Header score identifies a historical ledger day');
-  ok(window.document.getElementById('goodList').textContent.includes('2× this day'), 'Task count follows selected historical day');
+  ok(window.document.getElementById('habitList').textContent.includes('2× this day'), 'Task count follows selected historical day');
   window.returnToToday();
   eq(window.document.getElementById('todayDateInput').value, today, 'Today shortcut returns front page to current ledger day');
 
@@ -415,12 +479,12 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   const cleanJson = window.validateBackupObject(JSON.parse(JSON.stringify(exportObject)));
   eq(cleanJson.entries.length, 2, 'JSON backup round-trip preserves entries');
   eq(cleanJson.milestones.length, 1, 'JSON backup round-trip preserves milestones');
-  eq(cleanJson.taskSortModes.good, 'manual', 'JSON backup round-trip preserves task sorting');
+  eq(cleanJson.taskSortModes.habit, 'manual', 'JSON backup round-trip preserves habit sorting');
   const csv = window.buildFullCsvBackup().text;
   const cleanCsv = window.parseFullCsvBackup(csv);
   eq(cleanCsv.entries.length, 2, 'CSV backup round-trip preserves entries');
   eq(cleanCsv.milestones.length, 1, 'CSV backup round-trip preserves milestones');
-  eq(cleanCsv.taskSortModes.good, 'manual', 'CSV backup round-trip preserves task sorting');
+  eq(cleanCsv.taskSortModes.habit, 'manual', 'CSV backup round-trip preserves habit sorting');
 
   window.eval(`backupReminderDays = 0`);
   const csvNoReminder = window.parseFullCsvBackup(window.buildFullCsvBackup().text);
@@ -429,7 +493,16 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   const csvTwoWeeks = window.parseFullCsvBackup(window.buildFullCsvBackup().text);
   eq(csvTwoWeeks.backupReminderDays, 14, 'CSV backup preserves enabled reminder frequency');
 
-  const legacyV4Rows = window.parseCsvRows(window.buildFullCsvBackup().text)
+  const legacyV5Rows = window.parseCsvRows(window.buildFullCsvBackup().text);
+  const habitSortColumn = legacyV5Rows[0].indexOf('habit_sort_mode');
+  legacyV5Rows.forEach(row => row.splice(habitSortColumn, 1));
+  legacyV5Rows[1][legacyV5Rows[0].indexOf('format_version')] = '5';
+  const legacyV5Csv = legacyV5Rows
+    .map(row => row.map(value => window.csvCell(value, false)).join(','))
+    .join('\r\n') + '\r\n';
+  eq(window.parseFullCsvBackup(legacyV5Csv).taskSortModes.habit, 'manual', 'Legacy version-5 CSV migrates Credit and Debit sorting safely');
+
+  const legacyV4Rows = window.parseCsvRows(legacyV5Csv)
     .filter(row => row[1] !== 'task_section');
   const sectionColumn = legacyV4Rows[0].indexOf('section_id');
   legacyV4Rows.forEach(row => row.splice(sectionColumn, 1));
@@ -449,7 +522,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
     .map(row => row.map(value => window.csvCell(value, false)).join(','))
     .join('\r\n') + '\r\n';
   eq(window.parseFullCsvBackup(legacyV3Csv).backupReminderDays, 14, 'Legacy version-3 CSV preserves its reminder setting');
-  eq(window.parseFullCsvBackup(legacyV3Csv).taskSortModes.good, 'manual', 'Legacy version-3 CSV defaults task sorting safely');
+  eq(window.parseFullCsvBackup(legacyV3Csv).taskSortModes.habit, 'manual', 'Legacy version-3 CSV defaults habit sorting safely');
 
   const legacyV2Rows = window.parseCsvRows(legacyV3Csv);
   const reminderColumn = legacyV2Rows[0].indexOf('backup_reminder_days');
@@ -553,6 +626,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
         raceWindow.IDBKeyRange = IDBKeyRange;
         raceWindow.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
         raceWindow.scrollTo = () => {};
+        raceWindow.scrollBy = () => {};
         Object.defineProperty(raceWindow.navigator, 'storage', {
           configurable: true,
           value: {
@@ -597,9 +671,9 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   await Promise.all([
     cloudA.browser.window.eval(`
       entries.push({id:'cloud_a',date:'${cloudDate}',name:'Cloud A',type:'good',points:1,ts:11});
-      taskSections.push({id:'cloud_good_section',name:'Cloud group',kind:'good',order:0});
-      habits.push({id:'cloud_habit',name:'Cloud habit',type:'good',points:4,streak:0,lastDate:null,order:7,sectionId:'cloud_good_section'});
-      taskSortModes.good = 'name-desc';
+      taskSections.push({id:'cloud_habit_topic',name:'Cloud topic',kind:'habit',order:0});
+      habits.push({id:'cloud_habit',name:'Cloud habit',type:'good',points:4,streak:0,lastDate:null,order:7,sectionId:'cloud_habit_topic'});
+      taskSortModes.habit = 'name-desc';
       persistData()
     `),
     cloudB.browser.window.eval(`
@@ -621,10 +695,10 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], b
   const cloudIds = cloudReader.browser.window.eval('entries.map(entry => entry.id).sort()');
   eq(JSON.stringify(cloudIds), JSON.stringify(['cloud_a', 'cloud_b']), 'Two separate devices merge independent cloud writes without lost data');
   eq(cloudReader.browser.window.eval(`habits.find(item => item.id === 'cloud_habit').order`), 7, 'Cloud merge preserves explicit manual habit order');
-  eq(cloudReader.browser.window.eval(`habits.find(item => item.id === 'cloud_habit').sectionId`), 'cloud_good_section', 'Cloud merge preserves credit section membership');
+  eq(cloudReader.browser.window.eval(`habits.find(item => item.id === 'cloud_habit').sectionId`), 'cloud_habit_topic', 'Cloud merge preserves habit topic membership');
   eq(cloudReader.browser.window.eval(`bonusTasks.find(item => item.id === 'cloud_bonus').order`), 3, 'Cloud merge preserves explicit manual bonus order');
-  eq(cloudReader.browser.window.eval(`taskSections.length`), 2, 'Cloud merge preserves independent custom sections from two devices');
-  eq(cloudReader.browser.window.eval(`taskSortModes.good`), 'name-desc', 'Cloud merge preserves credit sort preference');
+  eq(cloudReader.browser.window.eval(`taskSections.length`), 2, 'Cloud merge preserves an independent habit topic and bonus section');
+  eq(cloudReader.browser.window.eval(`taskSortModes.habit`), 'name-desc', 'Cloud merge preserves habit sort preference');
   eq(cloudReader.browser.window.eval(`taskSortModes.bonus`), 'points-asc', 'Cloud merge preserves independent bonus sort preference');
   ok(sharedCloud.revision >= 3, 'Cloud revision advances monotonically through a write conflict');
   cloudA.browser.window.close();
