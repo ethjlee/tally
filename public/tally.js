@@ -1,6 +1,7 @@
 /* ================= state ================= */
 let habits = [];      // {id, name, type:'good'|'bad', points, streak, lastDate, order, sectionId}
 let bonusTasks = [];  // {id, name, points, order, sectionId}
+let dailyBonuses = []; // {id, name, points, description}; automatic no-debit rewards
 let taskSections = []; // {id, name, kind:'habit'|'bonus', order}
 let entries = [];     // {id, date, name, type:'good'|'bad'|'bonus', points, ts}
 let milestones = [];  // {id, name, days, points, description}
@@ -17,6 +18,7 @@ let taskSortModes = { habit:'manual', bonus:'manual' };
 let storageAvailable = true;
 let editingHabitId = null;
 let editingBonusId = null;
+let editingDailyBonusId = null;
 let editingMilestoneId = null;
 let editingTaskSectionId = null;
 let taskSectionKindDraft = 'habit';
@@ -37,8 +39,12 @@ let durableBaseSnapshot = null;
 let cloudEnabled = false;
 let cloudRevision = 0;
 let cloudBaseSnapshot = null;
-let cloudPendingWrite = null;
 let cloudSyncInFlight = null;
+let cloudRefreshRequested = false;
+let cloudBaseLocalRevision = null;
+let clearingDevice = false;
+let peerClearingDevice = false;
+let unreadableLocalState = false;
 let cloudSyncTimer = null;
 let cloudUsername = '';
 let cloudLastSyncedAt = null;
@@ -47,6 +53,7 @@ let cloudStatusMessage = 'Checking your private account…';
 let startupBlocked = false;
 let lastCloudRefreshAt = 0;
 let appReady = false;
+let dayRefreshTimer = null;
 
 /* ================= helpers ================= */
 // The "ledger day" starts at whatever hour is set in Settings ("Day starts at"),
@@ -108,28 +115,10 @@ function inferredStartDate(candidateEntries, hour = dayStartHour){
 }
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
-function habitStreakThroughDate(habit, end){
-  const sameNameGoodHabits = habits.filter(h => h.type === 'good' && h.name === habit.name);
-  const dates = [...new Set(entries
-    .filter(entry => entry.type === 'good' && entry.date <= end && entry.date >= statsStartKey() && (
-      entry.habitId
-        ? entry.habitId === habit.id
-        : (sameNameGoodHabits.length === 1 && entry.name === habit.name)
-    ))
-    .map(entry => entry.date)
-  )].sort();
-  if(!dates.length) return 0;
-  const lastDate = dates[dates.length - 1];
-  if(lastDate !== end && lastDate !== addDaysToKey(end, -1)) return 0;
-  let streak = 1;
-  let cursor = lastDate;
-  for(let index = dates.length - 2; index >= 0; index--){
-    const previous = addDaysToKey(cursor, -1);
-    if(dates[index] !== previous) break;
-    streak++;
-    cursor = previous;
-  }
-  return streak;
+function consecutiveHabitDays(dates, lastDate){
+  let length = 0;
+  for(let date = lastDate; dates?.has(date); date = addDaysToKey(date, -1)) length++;
+  return length;
 }
 
 const TASK_SORT_OPTIONS = [
@@ -146,42 +135,36 @@ function taskItems(kind){
   if(kind === 'habit') return habits;
   return habits.filter(habit => habit.type === kind);
 }
-function taskMatchesEntry(kind, task, entry){
-  if(kind === 'habit') return taskMatchesEntry(task.type, task, entry);
-  if(kind === 'bonus'){
-    if(entry.type !== 'bonus' || entry.derived) return false;
-    if(entry.bonusId) return entry.bonusId === task.id;
-    return bonusTasks.filter(item => item.name === task.name).length === 1 && entry.name === task.name;
-  }
-  if(entry.type !== kind) return false;
-  if(entry.habitId) return entry.habitId === task.id;
-  return habits.filter(item => item.type === kind && item.name === task.name).length === 1 && entry.name === task.name;
-}
-function taskUsageCounts(kind, list){
-  const counts = new Map(list.map(item => [item.id, 0]));
-  const linkKey = kind === 'bonus' ? 'bonusId' : 'habitId';
-  const nameKey = item => kind === 'habit' ? `${item.type}\u0000${item.name}` : item.name;
+function taskActivity(kind, selectedDate){
+  const isHabit = kind === 'habit';
+  const list = taskItems(kind);
+  const byId = new Map(list.map(item => [item.id, item]));
   const byName = new Map();
   for(const item of list){
-    const key = nameKey(item);
-    if(!byName.has(key)) byName.set(key, []);
-    byName.get(key).push(item.id);
+    const key = isHabit ? item.type + '\u0000' + item.name : item.name;
+    byName.set(key, byName.has(key) ? null : item);
   }
+  const counts = new Map();
+  const selectedCounts = new Map();
+  const creditDates = new Map();
   const start = statsStartKey();
   const end = todayKey();
   for(const entry of entries){
-    const matchesKind = kind === 'habit' ? entry.type === 'good' || entry.type === 'bad' : entry.type === kind;
-    if(entry.date < start || entry.date > end || !matchesKind || entry.derived) continue;
-    const linkedId = entry[linkKey];
-    if(linkedId && counts.has(linkedId)){
-      counts.set(linkedId, counts.get(linkedId) + 1);
-      continue;
+    if(entry.date < start || entry.date > end || entry.derived) continue;
+    if(isHabit ? entry.type === 'bonus' : entry.type !== 'bonus') continue;
+    const linkedId = isHabit ? entry.habitId : entry.bonusId;
+    const key = isHabit ? entry.type + '\u0000' + entry.name : entry.name;
+    const task = linkedId ? byId.get(linkedId) : byName.get(key);
+    if(!task) continue;
+    counts.set(task.id, (counts.get(task.id) || 0) + 1);
+    if(isHabit && entry.type !== task.type) continue;
+    if(entry.date === selectedDate) selectedCounts.set(task.id, (selectedCounts.get(task.id) || 0) + 1);
+    if(isHabit && entry.type === 'good' && entry.date <= selectedDate){
+      if(!creditDates.has(task.id)) creditDates.set(task.id, new Set());
+      creditDates.get(task.id).add(entry.date);
     }
-    if(linkedId) continue;
-    const candidates = byName.get(kind === 'habit' ? `${entry.type}\u0000${entry.name}` : entry.name) || [];
-    if(candidates.length === 1) counts.set(candidates[0], counts.get(candidates[0]) + 1);
   }
-  return counts;
+  return { counts, selectedCounts, creditDates };
 }
 function sectionIdValue(value){
   return value && value !== 'unsectioned' ? value : null;
@@ -207,15 +190,14 @@ function manualTaskItems(kind, sectionId){
     a.id.localeCompare(b.id)
   );
 }
-function sortedTaskItems(kind, sectionId){
+function sortedTaskItems(kind, sectionId, usage){
   const mode = taskSortModes[kind] || 'manual';
   const list = manualTaskItems(kind, sectionId);
   const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity:'base' }) || a.id.localeCompare(b.id);
-  const usage = mode === 'usage-desc' || mode === 'usage-asc' ? taskUsageCounts(kind, taskItems(kind)) : null;
   if(mode === 'name-asc') return list.sort(byName);
   if(mode === 'name-desc') return list.sort((a, b) => -byName(a, b));
-  if(mode === 'usage-desc') return list.sort((a, b) => usage.get(b.id) - usage.get(a.id) || byName(a, b));
-  if(mode === 'usage-asc') return list.sort((a, b) => usage.get(a.id) - usage.get(b.id) || byName(a, b));
+  if(mode === 'usage-desc') return list.sort((a, b) => (usage.get(b.id) || 0) - (usage.get(a.id) || 0) || byName(a, b));
+  if(mode === 'usage-asc') return list.sort((a, b) => (usage.get(a.id) || 0) - (usage.get(b.id) || 0) || byName(a, b));
   if(mode === 'points-desc') return list.sort((a, b) => b.points - a.points || byName(a, b));
   if(mode === 'points-asc') return list.sort((a, b) => a.points - b.points || byName(a, b));
   return list;
@@ -375,17 +357,35 @@ function dayHasManualActivity(date){
   return entries.some(entry => entry.date === date);
 }
 function isDayTracked(date){
-  return dayHasManualActivity(date) || !!explicitCompletionForDate(date);
+  return dayHasManualActivity(date) || !!explicitCompletionForDate(date) || hasDailyBonusForDate(date);
+}
+function hasDailyBonusForDate(date){
+  return dailyBonuses.length > 0 && date >= statsStartKey() && date < todayKey() &&
+    !entries.some(entry => entry.date === date && entry.type === 'bad');
+}
+function dailyBonusDateKeys(end = todayKey()){
+  if(!dailyBonuses.length) return [];
+  const lastDay = closedDayEnd(end);
+  const debitDates = new Set(entries.filter(entry => entry.type === 'bad').map(entry => entry.date));
+  const dates = [];
+  for(let date = statsStartKey(); date <= lastDay; date = addDaysToKey(date, 1)){
+    if(!debitDates.has(date)) dates.push(date);
+  }
+  return dates;
 }
 // Dates in `entries`/`completedDays` are already validated on load, so the window
 // test is a plain string comparison here. Resolving statsStartKey() once per call
 // (instead of once per item, inside isInStatsWindow) removes millions of Date
 // allocations from the render path on multi-year ledgers.
-function trackedDateKeys(end = todayKey()){
+function trackedDateKeys(end = todayKey(), bonusDates = dailyBonusDateKeys(end), manualDates = null){
   const start = statsStartKey();
-  const dates = new Set();
-  for(const entry of entries){
-    if(entry.date >= start && entry.date <= end) dates.add(entry.date);
+  const dates = new Set(bonusDates);
+  if(manualDates){
+    for(const date of manualDates) dates.add(date);
+  }else{
+    for(const entry of entries){
+      if(entry.date >= start && entry.date <= end) dates.add(entry.date);
+    }
   }
   for(const day of completedDays){
     if(day.date >= start && day.date <= end) dates.add(day.date);
@@ -404,71 +404,142 @@ function manualDailyTotalsByDate(end = todayKey()){
 function milestoneAwardId(milestone, date){
   return `milestone_${milestone.id}_${String(date).replace(/-/g, '')}`;
 }
+function closedDayEnd(end){
+  const yesterday = addDaysToKey(todayKey(), -1);
+  return end < yesterday ? end : yesterday;
+}
+function automaticAwardTimestamp(date){
+  const boundary = new Date(`${addDaysToKey(date, 1)}T00:00:00`);
+  boundary.setHours(dayStartHour, 0, 0, 0);
+  return Math.max(0, boundary.getTime());
+}
+// Derive awards from source records so reopening, backfilling, and concurrent
+// devices produce exactly one award per rule/day, without a background server job.
+function dailyBonusEntriesForDate(date){
+  const ts = automaticAwardTimestamp(date);
+  const dateSuffix = date.replace(/-/g, '');
+  return dailyBonuses.map(bonus => ({
+    id:`daily_bonus_${bonus.id}_${dateSuffix}`,
+    date, name:bonus.name, type:'bonus', points:bonus.points,
+    ts, dailyBonusId:bonus.id, description:bonus.description, derived:true
+  }));
+}
+function deriveDailyBonusEntries(end = todayKey()){
+  return dailyBonusDateKeys(end).flatMap(dailyBonusEntriesForDate);
+}
+function automaticEntryLabel(entry){
+  return entry.dailyBonusId ? 'Automatic daily bonus' : 'Automatic milestone';
+}
 
 // Milestone awards are derived instead of stored as mutable entries. That makes
 // retroactive definition/threshold edits deterministic and prevents duplicate
-// awards when two copies of Tally are open. Success is always decided from manual
-// activity first; an automatic reward can never create the success that awards it.
+// awards when two copies of Tally are open. Success uses the baseline and manual
+// totals; automatic reward points never contribute to success qualification.
 //
 // A milestone streak counts consecutive successful TRACKED days. Untracked calendar
 // days are unknown and therefore pause the streak: they neither advance it nor reset
 // it. Only a tracked day below the success threshold resets the streak.
-function deriveMilestoneEntries(end = todayKey()){
-  if(milestones.length === 0) return [];
-  const manualTotals = manualDailyTotalsByDate(end);
-  const trackedDates = trackedDateKeys(end);
+function milestoneAwardsByDate(trackedDates, manualTotals, end){
+  const awards = new Map();
+  if(!milestones.length) return awards;
+  const lastDay = closedDayEnd(end);
   const orderedMilestones = milestones.slice().sort((a, b) =>
     a.days - b.days || a.name.localeCompare(b.name) || a.id.localeCompare(b.id)
   );
-  const awards = [];
+  const milestonesByTarget = new Map();
+  for(const milestone of orderedMilestones){
+    if(!milestonesByTarget.has(milestone.days)) milestonesByTarget.set(milestone.days, []);
+    milestonesByTarget.get(milestone.days).push(milestone);
+  }
   let successStreak = 0;
   for(const date of trackedDates){
+    if(date > lastDay) break;
     const scoreBeforeAwards = dailyBase + (manualTotals[date] || 0);
     if(scoreBeforeAwards < successThreshold){
       successStreak = 0;
       continue;
     }
     successStreak++;
-    const earned = orderedMilestones.filter(milestone => milestone.days === successStreak);
-    earned.forEach((milestone, index) => {
-      const noon = new Date(`${date}T12:00:00`).getTime();
-      awards.push({
-        id:milestoneAwardId(milestone, date),
-        date,
-        name:milestone.name,
-        type:'bonus',
-        points:milestone.points,
-        ts:Math.max(0, noon + index),
-        milestoneId:milestone.id,
-        description:milestone.description,
-        derived:true
-      });
-    });
+    const earned = milestonesByTarget.get(successStreak);
+    if(earned) awards.set(date, earned);
   }
   return awards;
 }
+function milestoneEntriesForDate(date, earned){
+  if(!earned) return [];
+  const ts = automaticAwardTimestamp(date);
+  return earned.map((milestone, index) => ({
+    id:milestoneAwardId(milestone, date),
+    date, name:milestone.name, type:'bonus', points:milestone.points,
+    ts:ts + index, milestoneId:milestone.id, description:milestone.description, derived:true
+  }));
+}
+function deriveMilestoneEntries(end = todayKey()){
+  if(!milestones.length) return [];
+  const awards = milestoneAwardsByDate(trackedDateKeys(end), manualDailyTotalsByDate(end), end);
+  return [...awards].flatMap(([date, earned]) => milestoneEntriesForDate(date, earned));
+}
 function allActivityEntries(end = todayKey()){
-  return [...entries, ...deriveMilestoneEntries(end)];
+  return [...entries, ...deriveDailyBonusEntries(end), ...deriveMilestoneEntries(end)];
+}
+
+// Keep one set of totals per render. A no-debit day earns every daily rule,
+// so adding their combined points once per date gives the same ledger total.
+function summarizeLedger(end = todayKey()){
+  const manualByDate = manualDailyTotalsByDate(end);
+  const bonusDates = new Set(dailyBonusDateKeys(end));
+  const dates = trackedDateKeys(end, bonusDates, Object.keys(manualByDate));
+  const milestoneAwards = milestoneAwardsByDate(dates, manualByDate, end);
+  const byDate = Object.assign(Object.create(null), manualByDate);
+  const dailyBonusPoints = dailyBonuses.reduce((sum, bonus) => sum + bonus.points, 0);
+  for(const date of bonusDates) byDate[date] = (byDate[date] || 0) + dailyBonusPoints;
+  for(const [date, earned] of milestoneAwards){
+    byDate[date] = earned.reduce((sum, milestone) => sum + milestone.points, byDate[date] || 0);
+  }
+  return { end, manualByDate, byDate, dates, bonusDates, milestoneAwards };
 }
 
 /* ================= persistence ================= */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const DB_NAME = 'tally-ledger';
 const DB_VERSION = 1;
 const DB_STORE = 'records';
-const STATE_KEY = 'state';
-const FALLBACK_STATE_KEY = 'tally-state-v2';
-const FALLBACK_PREVIOUS_KEY = 'tally-state-previous-v2';
-const EMERGENCY_STATE_KEY = 'tally-emergency-v2';
-const RECOVERY_STATE_KEY = 'tally-recovery-v2';
-const CLOUD_BASE_KEY = 'cloud-base-v1';
-const CLOUD_BASE_FALLBACK_KEY = 'tally-cloud-base-v1';
+// Older cached clients can replace their own primary and recovery records at
+// startup. Keep the current ledger and sync base outside those write paths.
+const STATE_KEY = 'state-v7';
+const PREVIOUS_STATE_KEY = 'previous-v7';
+const RECOVERY_KEY = 'recovery-v7';
+const FALLBACK_STATE_KEY = 'tally-state-v7';
+const FALLBACK_PREVIOUS_KEY = 'tally-state-previous-v7';
+const EMERGENCY_STATE_KEY = 'tally-emergency-v7';
+const RECOVERY_STATE_KEY = 'tally-recovery-v7';
+const CLOUD_BASE_KEY = 'cloud-base-v7';
+const CLOUD_BASE_FALLBACK_KEY = 'tally-cloud-base-v7';
+const LEGACY_CLOUD_BASE_KEY = 'cloud-base-v1';
+const LEGACY_CLOUD_BASE_FALLBACK_KEY = 'tally-cloud-base-v1';
+const LEGACY_DB_SNAPSHOTS = [
+  ['state', 'legacy on-device database'],
+  ['previous', 'legacy previous database copy'],
+  ['recovery', 'legacy database recovery copy']
+];
+const LEGACY_LOCAL_SNAPSHOTS = [
+  ['tally-emergency-v2', 'legacy emergency copy'],
+  ['tally-state-v2', 'legacy browser storage copy'],
+  ['tally-state-previous-v2', 'legacy previous browser storage copy'],
+  ['tally-recovery-v2', 'legacy browser recovery copy']
+];
 const TRUSTED_DEVICE_KEY = 'trusted-device-v1';
 const TRUSTED_DEVICE_FALLBACK_KEY = 'tally-trusted-device-v1';
 const SAFE_ID = /^[a-z0-9_-]{1,80}$/i;
+const MAX_SYNC_BYTES = 5 * 1024 * 1024;
+const SYNC_COLLECTION_LIMITS = {
+  taskSections:1000, habits:1000, bonusTasks:1000, dailyBonuses:1000, milestones:1000,
+  completedDays:100000, entries:100000
+};
 let canUseLocalStorage = false;
 let persistInFlight = null;
 let persistDirty = false;
+let persistFailed = false;
 let syncChannel = null;
 let stickyStorageWarning = false;
 let reminderDismissedThisSession = false;
@@ -571,17 +642,18 @@ function migrateLegacyTaskSections(sections, habits){
 
 // Accepts the current versioned format and the original single-file backup
 // format. It returns a clean copy and drops unknown fields.
-function validateBackupObject(parsed){
+function validateBackupObject(parsed, forSync = true){
   if(!isPlainObject(parsed)) throw new Error('The backup must contain a JSON object.');
 
   let data;
   let settings;
   let revision = 0;
   const sourceSchemaVersion = Number.isInteger(parsed.schemaVersion) ? parsed.schemaVersion : 1;
-  if([SCHEMA_VERSION,5,4,3,2].includes(parsed.schemaVersion)){
+  if([SCHEMA_VERSION,6,5,4,3,2].includes(parsed.schemaVersion) ||
+      (parsed.schemaVersion === 1 && isPlainObject(parsed.data))){
     data = parsed.data;
     settings = parsed.settings;
-    revision = Number.isInteger(parsed.revision) && parsed.revision >= 0 ? parsed.revision : 0;
+    revision = Number.isSafeInteger(parsed.revision) && parsed.revision >= 0 ? parsed.revision : 0;
   } else if(Array.isArray(parsed.habits) && Array.isArray(parsed.bonusTasks) && Array.isArray(parsed.entries)){
     data = parsed;
     settings = parsed;
@@ -589,8 +661,9 @@ function validateBackupObject(parsed){
     throw new Error('This is not a recognized Tally backup.');
   }
   if(!isPlainObject(data) || !isPlainObject(settings)) throw new Error('The backup is missing ledger data or settings.');
+  if(forSync) validateSyncCollections(data);
 
-  const usesLegacySections = sourceSchemaVersion < SCHEMA_VERSION;
+  const usesLegacySections = sourceSchemaVersion < 6;
   let cleanTaskSections = requireArray(data.taskSections == null ? [] : data.taskSections, 'Task sections').map((section, i) => {
     if(!isPlainObject(section)) throw new Error(`Task section ${i + 1} is invalid.`);
     const validKinds = usesLegacySections ? ['good','bad','bonus'] : ['habit','bonus'];
@@ -629,6 +702,16 @@ function validateBackupObject(parsed){
       points: requireInteger(b.points, `Bonus entry ${i + 1} points`, 1, 999),
       order: requireInteger(b.order == null ? i : b.order, `Bonus entry ${i + 1} order`, 0, 1000000),
       sectionId: b.sectionId == null ? null : requireId(b.sectionId, `Bonus entry ${i + 1} section ID`)
+    };
+  });
+
+  const cleanDailyBonuses = requireArray(data.dailyBonuses == null ? [] : data.dailyBonuses, 'Automatic daily bonuses').map((bonus, i) => {
+    if(!isPlainObject(bonus)) throw new Error(`Automatic daily bonus ${i + 1} is invalid.`);
+    return {
+      id:requireId(bonus.id, `Automatic daily bonus ${i + 1} ID`),
+      name:requireString(bonus.name, `Automatic daily bonus ${i + 1} name`, 60),
+      points:requireInteger(bonus.points, `Automatic daily bonus ${i + 1} points`, 1, 9999),
+      description:requireOptionalString(bonus.description, `Automatic daily bonus ${i + 1} description`, 160)
     };
   });
 
@@ -676,6 +759,7 @@ function validateBackupObject(parsed){
   ensureUniqueIds(cleanTaskSections, 'Task sections');
   ensureUniqueIds(cleanHabits, 'Habits');
   ensureUniqueIds(cleanBonuses, 'Bonus entries');
+  ensureUniqueIds(cleanDailyBonuses, 'Automatic daily bonuses');
   ensureUniqueIds(cleanMilestones, 'Milestones');
   ensureUniqueIds(cleanCompletedDays, 'Completed days');
   ensureUniqueDates(cleanCompletedDays, 'Completed days');
@@ -702,16 +786,11 @@ function validateBackupObject(parsed){
   const cleanDailyBase = requireInteger(settings.dailyBase == null ? 100 : settings.dailyBase, 'Daily base', 0, 9999);
   const cleanThreshold = requireInteger(settings.successThreshold == null ? 80 : settings.successThreshold, 'Success threshold', 0, 9999);
   const cleanDayStart = requireInteger(settings.dayStartHour == null ? 7 : settings.dayStartHour, 'Day start hour', 0, 23);
-  const ledgerToday = ledgerDateKeyForHour(cleanDayStart);
   const requestedStart = settings.trackingStartDate;
-  let cleanStart = requestedStart == null
+  const cleanStart = requestedStart == null
     ? inferredStartDate([...cleanEntries, ...cleanCompletedDays], cleanDayStart)
     : requestedStart;
   if(!isValidDateKey(cleanStart)) throw new Error('Statistics start date is invalid.');
-  // A device clock/time-zone move can make yesterday's valid start date appear
-  // briefly "future" relative to the ledger boundary. Clamp instead of rejecting
-  // the entire saved ledger.
-  if(cleanStart > ledgerToday) cleanStart = ledgerToday;
   const backupDates = [validIsoTimestamp(settings.lastBackupAt), validIsoTimestamp(parsed.exportedAt)].filter(Boolean).sort();
   const validSortModes = new Set(['manual','name-asc','name-desc','usage-desc','usage-asc','points-desc','points-asc']);
   if(settings.taskSortModes != null && !isPlainObject(settings.taskSortModes)){
@@ -719,7 +798,7 @@ function validateBackupObject(parsed){
   }
   const requestedSortModes = isPlainObject(settings.taskSortModes) ? settings.taskSortModes : {};
   const cleanSortModes = {};
-  if(sourceSchemaVersion >= SCHEMA_VERSION){
+  if(sourceSchemaVersion >= 6){
     for(const kind of ['habit','bonus']){
       if(requestedSortModes[kind] != null && !validSortModes.has(requestedSortModes[kind])){
         throw new Error(`The ${kind} task sorting setting is invalid.`);
@@ -748,6 +827,7 @@ function validateBackupObject(parsed){
     taskSections: cleanTaskSections,
     habits: cleanHabits,
     bonusTasks: cleanBonuses,
+    dailyBonuses: cleanDailyBonuses,
     milestones: cleanMilestones,
     completedDays: cleanCompletedDays,
     entries: cleanEntries,
@@ -762,6 +842,26 @@ function validateBackupObject(parsed){
   };
 }
 
+function validateSyncCollections(data){
+  for(const [key, limit] of Object.entries(SYNC_COLLECTION_LIMITS)){
+    if(Array.isArray(data[key]) && data[key].length > limit){
+      const label = key.replace(/[A-Z]/g, c => ' ' + c.toLowerCase());
+      const error = new Error(`A synced ledger can contain at most ${limit.toLocaleString()} ${label}.`);
+      error.code = 'SYNC_COLLECTION_LIMIT';
+      throw error;
+    }
+  }
+}
+
+function canAddRecord(collection, records, fieldError){
+  const limit = SYNC_COLLECTION_LIMITS[collection];
+  if(records.length < limit) return true;
+  const message = `This collection has reached the cloud limit of ${limit.toLocaleString()} records.`;
+  if(fieldError) showFieldError(fieldError, message);
+  else showStorageBanner(message);
+  return false;
+}
+
 function buildSnapshot(){
   return {
     app: 'Tally',
@@ -773,6 +873,7 @@ function buildSnapshot(){
       taskSections: taskSections.map(section => ({ ...section })),
       habits: habits.map(h => ({ ...h })),
       bonusTasks: bonusTasks.map(b => ({ ...b })),
+      dailyBonuses: dailyBonuses.map(b => ({ ...b })),
       milestones: milestones.map(m => ({ ...m })),
       completedDays: completedDays.map(day => ({ ...day })),
       entries: entries.map(e => ({ ...e }))
@@ -792,6 +893,7 @@ function applyValidatedState(clean){
   taskSections = clean.taskSections;
   habits = clean.habits;
   bonusTasks = clean.bonusTasks;
+  dailyBonuses = clean.dailyBonuses;
   milestones = clean.milestones;
   completedDays = clean.completedDays;
   entries = clean.entries;
@@ -804,6 +906,7 @@ function applyValidatedState(clean){
   backupReminderDays = clean.backupReminderDays;
   taskSortModes = { ...clean.taskSortModes };
   stateRevision = clean.revision || 0;
+  updateLedgerDay();
   recomputeAllHabitStreaks();
 }
 
@@ -819,7 +922,6 @@ function probeLocalStorage(){
   }
 }
 function safeLocalGet(key){
-  if(!canUseLocalStorage) return null;
   try{ return window.localStorage.getItem(key); }catch(e){ return null; }
 }
 function safeLocalSet(key, value){
@@ -860,10 +962,18 @@ function idbGet(key){
     req.onerror = () => reject(req.error);
   });
 }
-function idbPut(key, value){
+function idbPut(key, value, shouldWrite){
   return new Promise((resolve, reject) => {
     const tx = tallyDb.transaction(DB_STORE, 'readwrite');
-    tx.objectStore(DB_STORE).put(value, key);
+    const store = tx.objectStore(DB_STORE);
+    if(shouldWrite){
+      const current = store.get(key);
+      current.onsuccess = () => {
+        if(shouldWrite(current.result)) store.put(value, key);
+      };
+    }else{
+      store.put(value, key);
+    }
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('Database write was aborted'));
@@ -897,7 +1007,7 @@ function idbHealthCheck(){
     }
   });
 }
-function idbWriteState(snapshot, expectedRevision = null){
+function idbWriteState(snapshot, expectedRevision, preserveSameRevision = false){
   return new Promise((resolve, reject) => {
     let tx;
     try{
@@ -910,14 +1020,15 @@ function idbWriteState(snapshot, expectedRevision = null){
     let outcome = { status:'written', latest:null };
     current.onsuccess = () => {
       const currentRevision = Number.isInteger(current.result && current.result.revision) ? current.result.revision : 0;
-      if(expectedRevision !== null && current.result && currentRevision > expectedRevision){
+      if(current.result && (currentRevision > expectedRevision ||
+          (preserveSameRevision && currentRevision === expectedRevision && parseStoredSnapshot(current.result)))){
         outcome = { status:'conflict', latest:current.result };
         return;
       }
       if(current.result){
         try{
-          validateBackupObject(current.result);
-          store.put(current.result, 'previous');
+          validateBackupObject(current.result, false);
+          store.put(current.result, PREVIOUS_STATE_KEY);
         }catch(e){}
       }
       store.put(snapshot, STATE_KEY);
@@ -932,7 +1043,7 @@ async function saveRecoverySnapshot(label, snapshot){
   let saved = false;
   try{
     if(tallyDb){
-      await idbPut('recovery', { ...snapshot, recoveryLabel:label, recoveredAt:new Date().toISOString() });
+      await idbPut(RECOVERY_KEY, { ...snapshot, recoveryLabel:label, recoveredAt:new Date().toISOString() });
       saved = true;
     }
   }catch(e){
@@ -958,6 +1069,7 @@ function snapshotFromClean(clean){
       taskSections:clean.taskSections.map(item => ({ ...item })),
       habits:clean.habits.map(item => ({ ...item })),
       bonusTasks:clean.bonusTasks.map(item => ({ ...item })),
+      dailyBonuses:clean.dailyBonuses.map(item => ({ ...item })),
       milestones:clean.milestones.map(item => ({ ...item })),
       completedDays:clean.completedDays.map(item => ({ ...item })),
       entries:clean.entries.map(item => ({ ...item }))
@@ -974,7 +1086,7 @@ function snapshotFromClean(clean){
     }
   };
 }
-function mergeEntitiesById(baseItems, localItems, remoteItems){
+function mergeEntitiesById(baseItems, localItems, remoteItems, equal = valuesEqual){
   const base = new Map(baseItems.map(item => [item.id, item]));
   const local = new Map(localItems.map(item => [item.id, item]));
   const remote = new Map(remoteItems.map(item => [item.id, item]));
@@ -987,9 +1099,9 @@ function mergeEntitiesById(baseItems, localItems, remoteItems){
     const l = local.get(id);
     const r = remote.get(id);
     let chosen;
-    if(valuesEqual(l, b)) chosen = r;
-    else if(valuesEqual(r, b)) chosen = l;
-    else if(valuesEqual(l, r)) chosen = l;
+    if(equal(l, b)) chosen = r;
+    else if(equal(r, b)) chosen = l;
+    else if(equal(l, r)) chosen = l;
     else {
       hadDirectConflict = true;
       // If one copy deleted an item while the other edited it, preserve the edit.
@@ -1001,17 +1113,42 @@ function mergeEntitiesById(baseItems, localItems, remoteItems){
   }
   return { items:merged, hadDirectConflict };
 }
+function habitDefinition(habit){
+  if(!habit) return habit;
+  const { streak, lastDate, ...definition } = habit;
+  return definition;
+}
 function mergeConcurrentSnapshots(baseSnapshot, localSnapshot, remoteSnapshot){
   const base = baseSnapshot || remoteSnapshot;
-  const habitsMerge = mergeEntitiesById(base.data.habits, localSnapshot.data.habits, remoteSnapshot.data.habits);
+  const habitsMerge = mergeEntitiesById(base.data.habits, localSnapshot.data.habits, remoteSnapshot.data.habits,
+    (a, b) => valuesEqual(habitDefinition(a), habitDefinition(b)));
   const bonusMerge = mergeEntitiesById(base.data.bonusTasks, localSnapshot.data.bonusTasks, remoteSnapshot.data.bonusTasks);
+  const dailyBonusMerge = mergeEntitiesById(base.data.dailyBonuses || [], localSnapshot.data.dailyBonuses || [], remoteSnapshot.data.dailyBonuses || []);
   const taskSectionMerge = mergeEntitiesById(base.data.taskSections || [], localSnapshot.data.taskSections || [], remoteSnapshot.data.taskSections || []);
   const milestoneMerge = mergeEntitiesById(base.data.milestones, localSnapshot.data.milestones, remoteSnapshot.data.milestones);
   const completedDayMerge = mergeEntitiesById(base.data.completedDays, localSnapshot.data.completedDays, remoteSnapshot.data.completedDays);
   const entryMerge = mergeEntitiesById(base.data.entries, localSnapshot.data.entries, remoteSnapshot.data.entries);
   const settings = {};
-  let hadDirectConflict = habitsMerge.hadDirectConflict || bonusMerge.hadDirectConflict || taskSectionMerge.hadDirectConflict ||
+  let hadDirectConflict = habitsMerge.hadDirectConflict || bonusMerge.hadDirectConflict || dailyBonusMerge.hadDirectConflict || taskSectionMerge.hadDirectConflict ||
     milestoneMerge.hadDirectConflict || completedDayMerge.hadDirectConflict || entryMerge.hadDirectConflict;
+  const sectionKinds = new Map(taskSectionMerge.items.map(section => [section.id, section.kind]));
+  for(const [kind, items] of [['habit', habitsMerge.items], ['bonus', bonusMerge.items]]){
+    for(const item of items){
+      if(item.sectionId && sectionKinds.get(item.sectionId) !== kind){
+        item.sectionId = null;
+        hadDirectConflict = true;
+      }
+    }
+  }
+  const completedDates = new Set();
+  const completed = completedDayMerge.items.filter(item => {
+    if(completedDates.has(item.date)){
+      hadDirectConflict = true;
+      return false;
+    }
+    completedDates.add(item.date);
+    return true;
+  });
   for(const key of ['dailyBase','successThreshold','dayStartHour','trackingStartDate','lastBackupAt','historyRangeDays','backupReminderDays','taskSortModes']){
     const b = base.settings[key];
     const l = localSnapshot.settings[key];
@@ -1053,8 +1190,9 @@ function mergeConcurrentSnapshots(baseSnapshot, localSnapshot, remoteSnapshot){
         taskSections:taskSectionMerge.items,
         habits:habitsMerge.items,
         bonusTasks:bonusMerge.items,
+        dailyBonuses:dailyBonusMerge.items,
         milestones:milestoneMerge.items,
-        completedDays:completedDayMerge.items,
+        completedDays:completed,
         entries:entryMerge.items
       },
       settings
@@ -1066,7 +1204,7 @@ function parseStoredSnapshot(raw){
   if(!raw) return null;
   try{
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    const clean = validateBackupObject(parsed);
+    const clean = validateBackupObject(parsed, false);
     return { raw:parsed, clean };
   }catch(e){
     return null;
@@ -1117,6 +1255,10 @@ async function withPersistenceLock(callback){
   return callback();
 }
 async function writeDurableSnapshot(snapshot){
+  const fallback = parseStoredSnapshot(safeLocalGet(FALLBACK_STATE_KEY));
+  if(fallback && fallback.clean.revision > durableRevision){
+    return { status:'conflict', latest:fallback.raw };
+  }
   if(tallyDb){
     try{
       return await idbWriteState(snapshot, durableRevision);
@@ -1130,12 +1272,16 @@ async function writeDurableSnapshot(snapshot){
   if(canUseLocalStorage) return writeFallbackState(snapshot, durableRevision);
   throw new Error('No durable browser storage is available');
 }
-async function mergeWriteConflict(latestRaw, localSnapshot){
-  const remoteClean = validateBackupObject(latestRaw);
+async function mergeWriteConflict(latestRaw){
+  const remoteClean = validateBackupObject(latestRaw, false);
   const remoteSnapshot = snapshotFromClean(remoteClean);
-  await saveRecoverySnapshot('concurrent-local-copy', localSnapshot);
+  let localSnapshot;
+  do {
+    localSnapshot = buildSnapshot();
+    if(!await saveRecoverySnapshot('concurrent-local-copy', localSnapshot)) throw new Error('RECOVERY_SAVE_FAILED');
+  } while(stateRevision !== localSnapshot.revision);
   const merged = mergeConcurrentSnapshots(durableBaseSnapshot, localSnapshot, remoteSnapshot);
-  const mergedClean = validateBackupObject(merged.snapshot);
+  const mergedClean = validateBackupObject(merged.snapshot, false);
   applyValidatedState(mergedClean);
   durableRevision = remoteClean.revision;
   durableBaseSnapshot = cloneJson(remoteSnapshot);
@@ -1168,20 +1314,23 @@ async function flushPersistLoop(){
     while(persistDirty){
       persistDirty = false;
       const snapshot = buildSnapshot();
-      validateBackupObject(snapshot);
+      validateBackupObject(snapshot, false);
       const result = await withPersistenceLock(() => writeDurableSnapshot(snapshot));
       if(result.status === 'conflict'){
-        await mergeWriteConflict(result.latest, snapshot);
+        await mergeWriteConflict(result.latest);
         continue;
       }
       durableRevision = snapshot.revision;
       durableBaseSnapshot = cloneJson(snapshot);
+      persistFailed = false;
+      unreadableLocalState = false;
       mirrorDurableSnapshot(snapshot);
       if(syncChannel) syncChannel.postMessage({ revision:snapshot.revision, writerId:CLIENT_ID });
       queueCloudSnapshot(snapshot);
       if(!stickyStorageWarning) hideSaveWarning();
     }
   }catch(e){
+    persistFailed = true;
     console.error('Tally: save failed', e);
     showSaveWarning();
   }finally{
@@ -1290,7 +1439,7 @@ function parseCandidate(raw, source, candidates, problems){
   if(!raw) return;
   try{
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    const clean = validateBackupObject(parsed);
+    const clean = validateBackupObject(parsed, false);
     candidates.push({
       clean,
       source,
@@ -1298,6 +1447,44 @@ function parseCandidate(raw, source, candidates, problems){
     });
   }catch(e){
     problems.push(`${source}: ${e.message}`);
+  }
+}
+
+async function readDatabaseCopies(sources, candidates, problems){
+  if(!tallyDb) return;
+  for(const [key, source] of sources){
+    try{ parseCandidate(await idbGet(key), source, candidates, problems); }
+    catch(e){ problems.push(`${source}: ${e.message}`); }
+  }
+}
+
+function readLocalCopies(sources, candidates, problems){
+  for(const [key, source] of sources){
+    parseCandidate(safeLocalGet(key), source, candidates, problems);
+  }
+}
+
+function readOriginalLedger(candidates, problems){
+  const legacyDataRaw = safeLocalGet('tally-data');
+  if(!legacyDataRaw) return;
+  try{
+    const legacyData = JSON.parse(legacyDataRaw);
+    const legacySettingsRaw = safeLocalGet('tally-settings');
+    const legacySettings = legacySettingsRaw ? JSON.parse(legacySettingsRaw) : legacyData;
+    parseCandidate({
+      taskSections: legacyData.taskSections || [],
+      habits: legacyData.habits || [],
+      bonusTasks: legacyData.bonusTasks || [],
+      entries: legacyData.entries || [],
+      dailyBase: legacySettings.dailyBase,
+      successThreshold: legacySettings.successThreshold,
+      dayStartHour: legacySettings.dayStartHour,
+      trackingStartDate: legacySettings.trackingStartDate,
+      lastBackupAt: legacySettings.lastBackupAt,
+      historyRangeDays: legacySettings.historyRangeDays
+    }, 'legacy storage', candidates, problems);
+  }catch(e){
+    problems.push(`legacy storage: ${e.message}`);
   }
 }
 
@@ -1318,51 +1505,40 @@ async function loadAll(){
 
     if(!await verifyCloudAccess()) return;
 
-    if(tallyDb){
-      try{ parseCandidate(await idbGet(STATE_KEY), 'on-device database', candidates, problems); }
-      catch(e){ problems.push(`on-device database: ${e.message}`); }
-      try{ parseCandidate(await idbGet('previous'), 'previous database copy', candidates, problems); }
-      catch(e){ problems.push(`previous database copy: ${e.message}`); }
-      try{ parseCandidate(await idbGet('recovery'), 'database recovery copy', candidates, problems); }
-      catch(e){ problems.push(`database recovery copy: ${e.message}`); }
-    }
-    parseCandidate(safeLocalGet(EMERGENCY_STATE_KEY), 'emergency copy', candidates, problems);
-    parseCandidate(safeLocalGet(FALLBACK_STATE_KEY), 'browser storage copy', candidates, problems);
-    parseCandidate(safeLocalGet(FALLBACK_PREVIOUS_KEY), 'previous browser storage copy', candidates, problems);
-    parseCandidate(safeLocalGet(RECOVERY_STATE_KEY), 'browser recovery copy', candidates, problems);
+    await readDatabaseCopies([
+      [STATE_KEY, 'on-device database'],
+      [PREVIOUS_STATE_KEY, 'previous database copy'],
+      [RECOVERY_KEY, 'database recovery copy']
+    ], candidates, problems);
+    readLocalCopies([
+      [EMERGENCY_STATE_KEY, 'emergency copy'],
+      [FALLBACK_STATE_KEY, 'browser storage copy'],
+      [FALLBACK_PREVIOUS_KEY, 'previous browser storage copy'],
+      [RECOVERY_STATE_KEY, 'browser recovery copy']
+    ], candidates, problems);
 
-    // One-time migration from the original two-key format.
-    const legacyDataRaw = safeLocalGet('tally-data');
-    if(legacyDataRaw){
-      try{
-        const legacyData = JSON.parse(legacyDataRaw);
-        const legacySettingsRaw = safeLocalGet('tally-settings');
-        const legacySettings = legacySettingsRaw ? JSON.parse(legacySettingsRaw) : legacyData;
-        parseCandidate({
-          taskSections: legacyData.taskSections || [],
-          habits: legacyData.habits || [],
-          bonusTasks: legacyData.bonusTasks || [],
-          entries: legacyData.entries || [],
-          dailyBase: legacySettings.dailyBase,
-          successThreshold: legacySettings.successThreshold,
-          dayStartHour: legacySettings.dayStartHour,
-          trackingStartDate: legacySettings.trackingStartDate,
-          lastBackupAt: legacySettings.lastBackupAt,
-          historyRangeDays: legacySettings.historyRangeDays
-        }, 'legacy storage', candidates, problems);
-      }catch(e){
-        problems.push(`legacy storage: ${e.message}`);
-      }
+    if(!candidates.length){
+      await readDatabaseCopies(LEGACY_DB_SNAPSHOTS, candidates, problems);
+      readLocalCopies(LEGACY_LOCAL_SNAPSHOTS, candidates, problems);
+      readOriginalLedger(candidates, problems);
+      if(candidates.length) await migrateLegacyCloudBase();
     }
 
     if(candidates.length){
       candidates.sort((a,b) => b.clean.revision - a.clean.revision);
       applyValidatedState(candidates[0].clean);
-      const loadedSnapshot = buildSnapshot();
+      let loadedSnapshot = buildSnapshot();
+      let result;
       if(tallyDb && (candidates[0].source !== 'on-device database' || candidates[0].schemaVersion !== SCHEMA_VERSION)){
-        await idbWriteState(loadedSnapshot);
+        result = await idbWriteState(loadedSnapshot, loadedSnapshot.revision, true);
       }
-      if(!tallyDb && canUseLocalStorage) writeFallbackState(loadedSnapshot, candidates[0].clean.revision);
+      if(!tallyDb && canUseLocalStorage){
+        result = writeFallbackState(loadedSnapshot, loadedSnapshot.revision);
+      }
+      if(result?.status === 'conflict'){
+        applyValidatedState(validateBackupObject(result.latest, false));
+        loadedSnapshot = buildSnapshot();
+      }
       durableRevision = stateRevision;
       durableBaseSnapshot = cloneJson(loadedSnapshot);
       mirrorDurableSnapshot(loadedSnapshot);
@@ -1372,6 +1548,7 @@ async function loadAll(){
     }
 
     if(problems.length && !candidates.length){
+      unreadableLocalState = true;
       showStorageBanner('Saved data could not be read. It was left untouched; restore a known-good backup from Data.', true);
     } else if(!storageAvailable){
       showStorageBanner("This browser is blocking durable storage. Save a backup before closing the app.", true);
@@ -1399,13 +1576,19 @@ function setupCrossWindowSync(){
       syncChannel = new BroadcastChannel('tally-sync-v2');
       syncChannel.onmessage = async event => {
         if(event.data && event.data.type === 'prepare-clear-device'){
-          closeDeviceDatabase();
+          peerClearingDevice = true;
+          clearTimeout(cloudSyncTimer);
+          cloudRefreshRequested = false;
           const loading = document.getElementById('loadingScreen');
           loading.textContent = 'Signing out on this device…';
           loading.style.display = 'flex';
+          if(persistInFlight) await persistInFlight;
+          if(peerClearingDevice) closeDeviceDatabase();
           return;
         }
         if(event.data && event.data.type === 'clear-device'){
+          peerClearingDevice = true;
+          appReady = false;
           closeDeviceDatabase();
           clearTallyLocalStorage();
           window.location.replace('/login');
@@ -1415,31 +1598,40 @@ function setupCrossWindowSync(){
           window.location.reload();
           return;
         }
-        if(!event.data || event.data.writerId === CLIENT_ID || event.data.revision <= durableRevision || persistInFlight || !tallyDb) return;
+        if(!event.data || event.data.writerId === CLIENT_ID || event.data.revision <= durableRevision || !tallyDb) return;
         try{
-          const latest = await idbGet(STATE_KEY);
-          const clean = validateBackupObject(latest);
-          if(clean.revision > durableRevision){
-            applyValidatedState(clean);
-            durableRevision = clean.revision;
-            durableBaseSnapshot = cloneJson(buildSnapshot());
-            mirrorDurableSnapshot(durableBaseSnapshot);
-            renderAll();
-          }
+          await refreshDurableState();
         }catch(e){}
       };
     }catch(e){}
   }
 
   window.addEventListener('storage', event => {
-    if(event.key !== FALLBACK_STATE_KEY || !event.newValue || tallyDb || persistInFlight) return;
-    const latest = parseStoredSnapshot(event.newValue);
-    if(!latest || latest.clean.revision <= durableRevision || latest.clean.writerId === CLIENT_ID) return;
-    applyValidatedState(latest.clean);
-    durableRevision = latest.clean.revision;
-    durableBaseSnapshot = cloneJson(buildSnapshot());
-    renderAll();
+    if(event.key === FALLBACK_STATE_KEY && event.newValue) refreshDurableState().catch(() => {});
   });
+}
+
+async function refreshDurableState(){
+  for(;;){
+    if(peerClearingDevice) throw new Error('DEVICE_CLEAR_IN_PROGRESS');
+    if(persistInFlight) await persistInFlight;
+    if(persistFailed) throw new Error('LOCAL_SAVE_FAILED');
+    const revision = stateRevision;
+    const raw = tallyDb ? await idbGet(STATE_KEY) : null;
+    if(persistInFlight || revision !== stateRevision) continue;
+    if(peerClearingDevice) throw new Error('DEVICE_CLEAR_IN_PROGRESS');
+    const databaseCopy = parseStoredSnapshot(raw);
+    const fallbackCopy = parseStoredSnapshot(safeLocalGet(FALLBACK_STATE_KEY));
+    const latest = fallbackCopy && (!databaseCopy || fallbackCopy.clean.revision > databaseCopy.clean.revision)
+      ? fallbackCopy : databaseCopy;
+    if(latest && latest.clean.revision > durableRevision){
+      applyValidatedState(latest.clean);
+      durableRevision = latest.clean.revision;
+      durableBaseSnapshot = buildSnapshot();
+      renderAll();
+    }
+    return;
+  }
 }
 
 /* ================= private cloud sync ================= */
@@ -1524,7 +1716,8 @@ async function verifyCloudAccess(){
 }
 
 function snapshotContent(snapshot){
-  return { data:snapshot.data, settings:snapshot.settings };
+  const habits = snapshot.data.habits.map(habitDefinition);
+  return { data:{ ...snapshot.data, habits }, settings:snapshot.settings };
 }
 
 function snapshotContentEqual(a, b){
@@ -1537,30 +1730,59 @@ function cloudMergeBase(reference){
     schemaVersion:SCHEMA_VERSION,
     revision:0,
     writerId:null,
-    data:{ taskSections:[], habits:[], bonusTasks:[], milestones:[], completedDays:[], entries:[] },
+    data:{ taskSections:[], habits:[], bonusTasks:[], dailyBonuses:[], milestones:[], completedDays:[], entries:[] },
     settings:cloneJson(reference.settings)
   };
 }
 
-async function readCloudBaseRecord(){
-  let raw = null;
+function parseCloudBaseRecord(raw){
   try{
-    raw = tallyDb ? await idbGet(CLOUD_BASE_KEY) : safeLocalGet(CLOUD_BASE_FALLBACK_KEY);
     if(typeof raw === 'string') raw = JSON.parse(raw);
     if(!raw || !Number.isSafeInteger(raw.cloudRevision) || raw.cloudRevision < 0 || !raw.snapshot) return null;
-    const clean = validateBackupObject(raw.snapshot);
-    return { cloudRevision:raw.cloudRevision, snapshot:snapshotFromClean(clean) };
+    const clean = validateBackupObject(raw.snapshot, false);
+    const localRevision = Number.isSafeInteger(raw.localRevision) && raw.localRevision >= 0 ? raw.localRevision : null;
+    return { cloudRevision:raw.cloudRevision, localRevision, snapshot:snapshotFromClean(clean) };
   }catch(e){
     return null;
   }
 }
 
+async function newestCloudBaseRecord(databaseKey, fallbackKey){
+  const fallback = parseCloudBaseRecord(safeLocalGet(fallbackKey));
+  let database = null;
+  try{
+    if(tallyDb) database = parseCloudBaseRecord(await idbGet(databaseKey));
+  }catch(e){}
+  if(fallback && (!database || fallback.cloudRevision > database.cloudRevision ||
+      (fallback.cloudRevision === database.cloudRevision && database.localRevision === null))) return fallback;
+  return database;
+}
+
+function readCloudBaseRecord(){
+  return newestCloudBaseRecord(CLOUD_BASE_KEY, CLOUD_BASE_FALLBACK_KEY);
+}
+
+async function migrateLegacyCloudBase(){
+  try{
+    const record = await newestCloudBaseRecord(LEGACY_CLOUD_BASE_KEY, LEGACY_CLOUD_BASE_FALLBACK_KEY);
+    if(!record) return;
+    if(tallyDb){
+      await idbPut(CLOUD_BASE_KEY, record, current => current === undefined);
+    }else if(!safeLocalGet(CLOUD_BASE_FALLBACK_KEY)){
+      safeLocalSet(CLOUD_BASE_FALLBACK_KEY, JSON.stringify(record));
+    }
+  }catch(e){}
+}
+
 async function writeCloudBaseRecord(){
   if(!cloudBaseSnapshot) return;
-  const record = { cloudRevision, snapshot:cloudBaseSnapshot, savedAt:new Date().toISOString() };
+  const record = { cloudRevision, localRevision:cloudBaseLocalRevision, snapshot:cloudBaseSnapshot };
+  const canAdvance = raw => !raw || raw.cloudRevision <= record.cloudRevision;
   try{
-    if(tallyDb) await idbPut(CLOUD_BASE_KEY, record);
-    else safeLocalSet(CLOUD_BASE_FALLBACK_KEY, JSON.stringify(record));
+    if(tallyDb) await idbPut(CLOUD_BASE_KEY, record, canAdvance);
+    else if(canAdvance(parseCloudBaseRecord(safeLocalGet(CLOUD_BASE_FALLBACK_KEY)))){
+      safeLocalSet(CLOUD_BASE_FALLBACK_KEY, JSON.stringify(record));
+    }
   }catch(e){}
 }
 
@@ -1580,192 +1802,173 @@ async function fetchCloudState(){
   return payload;
 }
 
-async function applyCloudSnapshot(snapshot){
-  const previousRevision = stateRevision;
-  const clean = validateBackupObject(snapshot);
-  applyValidatedState(clean);
-  stateRevision = Math.max(previousRevision, clean.revision || 0);
-  await schedulePersist();
-  renderAll();
+async function recordCloudBase(revision, snapshot, updatedAt, localRevision){
+  cloudRevision = revision;
+  cloudBaseSnapshot = snapshot;
+  cloudBaseLocalRevision = localRevision;
+  cloudLastSyncedAt = updatedAt || null;
+  if(snapshot) await writeCloudBaseRecord();
 }
 
 async function reconcileCloudState(remote){
-  const localSnapshot = buildSnapshot();
-  const remoteSnapshot = remote.snapshot
-    ? snapshotFromClean(validateBackupObject(remote.snapshot))
-    : null;
+  const revision = remote.cloudRevision;
+  if(!Number.isSafeInteger(revision) || revision < 0 || (revision === 0) !== (remote.snapshot === null)){
+    throw new Error('INVALID_CLOUD_STATE');
+  }
+  const remoteSnapshot = revision && snapshotFromClean(validateBackupObject(remote.snapshot));
   const storedBase = await readCloudBaseRecord();
-  const base = storedBase && storedBase.cloudRevision <= remote.cloudRevision
-    ? storedBase.snapshot
-    : cloudBaseSnapshot;
 
-  cloudRevision = Number(remote.cloudRevision) || 0;
-  cloudBaseSnapshot = remoteSnapshot ? cloneJson(remoteSnapshot) : null;
-  cloudLastSyncedAt = remote.updatedAt || null;
-  if(cloudBaseSnapshot) await writeCloudBaseRecord();
+  for(;;){
+    await refreshDurableState();
+    if(persistInFlight) continue;
+    if(unreadableLocalState) throw new Error('LOCAL_STATE_UNREADABLE');
+    const localSnapshot = buildSnapshot();
+    // A record from an older release may have been advanced before its merge
+    // committed. Without a confirmed local revision it cannot authorize deletes.
+    let base = cloudBaseSnapshot && cloudBaseLocalRevision <= durableRevision && cloudRevision <= revision
+      ? cloudBaseSnapshot : null;
+    if(storedBase && storedBase.cloudRevision <= revision &&
+        storedBase.localRevision !== null && storedBase.localRevision <= durableRevision &&
+        (!base || storedBase.cloudRevision >= cloudRevision)){
+      base = storedBase.snapshot;
+    }
 
-  if(!remoteSnapshot){
-    queueCloudSnapshot(localSnapshot);
-    return;
-  }
-
-  if(snapshotContentEqual(localSnapshot, remoteSnapshot)) return;
-
-  if(base){
-    const localChanged = !snapshotContentEqual(localSnapshot, base);
-    const remoteChanged = !snapshotContentEqual(remoteSnapshot, base);
-    if(!localChanged && remoteChanged){
-      await applyCloudSnapshot(remoteSnapshot);
+    if(!remoteSnapshot){
+      if(cloudRevision > 0 || storedBase?.cloudRevision > 0) throw new Error('CLOUD_SNAPSHOT_MISSING');
+      await recordCloudBase(revision, null, remote.updatedAt, durableRevision);
       return;
     }
-    if(localChanged && !remoteChanged){
-      queueCloudSnapshot(localSnapshot);
+
+    if(snapshotContentEqual(localSnapshot, remoteSnapshot) ||
+        (base && snapshotContentEqual(base, remoteSnapshot))){
+      await recordCloudBase(revision, remoteSnapshot, remote.updatedAt, durableRevision);
       return;
     }
-    if(!localChanged && !remoteChanged) return;
-  }else if(!hasAnyLedgerData()){
-    await applyCloudSnapshot(remoteSnapshot);
+
+    let candidate = remoteSnapshot;
+    let hadConflict = false;
+    if(base ? !snapshotContentEqual(base, localSnapshot) : (durableRevision > 0 || hasAnyLedgerData())){
+      if(!await saveRecoverySnapshot('pre-cloud-merge', localSnapshot)) throw new Error('RECOVERY_SAVE_FAILED');
+      if(peerClearingDevice) throw new Error('DEVICE_CLEAR_IN_PROGRESS');
+      if(stateRevision !== localSnapshot.revision || persistInFlight) continue;
+      // With no confirmed ancestry, combine independent records and retain the
+      // cloud version of shared records. The incoming local copy remains recoverable.
+      const merged = base
+        ? mergeConcurrentSnapshots(base, localSnapshot, remoteSnapshot)
+        : mergeConcurrentSnapshots(cloudMergeBase(localSnapshot), remoteSnapshot, localSnapshot);
+      candidate = merged.snapshot;
+      hadConflict = merged.hadDirectConflict;
+    }
+
+    const clean = validateBackupObject(candidate);
+    if(!snapshotContentEqual(candidate, localSnapshot)){
+      applyValidatedState(clean);
+      stateRevision = Math.max(localSnapshot.revision, clean.revision);
+      await schedulePersist();
+      if(persistFailed) throw new Error('LOCAL_SAVE_FAILED');
+      renderAll();
+    }
+    await recordCloudBase(revision, remoteSnapshot, remote.updatedAt, durableRevision);
+    if(hadConflict){
+      showStorageBanner(
+        base
+          ? 'Two devices changed the same item. Tally saved a recovery copy and kept the device edit where both copies changed the same record.'
+          : 'These copies have no confirmed common revision. Tally kept cloud versions of shared records and saved the incoming device copy for review.',
+        true
+      );
+    }
     return;
-  }
-
-  await saveRecoverySnapshot('pre-cloud-merge', localSnapshot);
-  const merged = mergeConcurrentSnapshots(
-    base || cloudMergeBase(remoteSnapshot),
-    localSnapshot,
-    remoteSnapshot
-  );
-  const mergedClean = validateBackupObject(merged.snapshot);
-  applyValidatedState(mergedClean);
-  stateRevision = Math.max(localSnapshot.revision || 0, remoteSnapshot.revision || 0) + 1;
-  await schedulePersist();
-  renderAll();
-
-  if(merged.hadDirectConflict){
-    showStorageBanner('This device and the cloud changed the same item. Tally kept this device’s edit, saved a recovery copy, and merged everything else. Review recent activity and export a backup.', true);
   }
 }
 
 async function initializeCloudSync(){
-  setCloudStatus('checking', 'Comparing this device with the encrypted cloud ledger…');
-  try{
-    const remote = await fetchCloudState();
-    await reconcileCloudState(remote);
-    queueCloudSnapshot(buildSnapshot());
-    await flushCloudSync();
-    lastCloudRefreshAt = Date.now();
-  }catch(e){
-    if(e.message !== 'UNAUTHORIZED'){
-      cloudEnabled = false;
-      setCloudStatus('offline', 'Cloud could not be reached. Your on-device copy remains available and unchanged.');
-    }
-  }
+  await syncCloudNow();
 }
 
 function queueCloudSnapshot(snapshot){
-  if(!cloudEnabled) return;
-  if(!cloudSyncInFlight && !cloudPendingWrite && cloudBaseSnapshot && snapshotContentEqual(snapshot, cloudBaseSnapshot)){
-    const when = cloudLastSyncedAt
-      ? new Date(cloudLastSyncedAt).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' })
-      : 'just now';
-    setCloudStatus('synced', `Last confirmed ${when}. Postgres holds encrypted ciphertext; this device keeps the offline copy.`);
-    return;
-  }
-  cloudPendingWrite = {
-    snapshot:cloneJson(snapshot),
-    operationId:`op_${uid()}_${uid()}`
-  };
+  if(!cloudEnabled || clearingDevice || peerClearingDevice) return;
+  if(cloudBaseSnapshot && snapshotContentEqual(snapshot, cloudBaseSnapshot)) return;
+  cloudRefreshRequested = true;
+  if(cloudSyncInFlight) return;
   clearTimeout(cloudSyncTimer);
-  cloudSyncTimer = setTimeout(() => { flushCloudSync(); }, 600);
+  cloudSyncTimer = setTimeout(syncCloudNow, 600);
   setCloudStatus('syncing', 'A validated on-device save is waiting to upload.');
 }
 
-async function flushCloudSync(){
-  if(cloudSyncInFlight) return cloudSyncInFlight;
-  cloudSyncInFlight = runCloudSyncLoop().finally(() => {
-    cloudSyncInFlight = null;
-    renderCloudStatus();
-  });
+function syncCloudNow(){
+  if(peerClearingDevice) return Promise.resolve(false);
+  cloudRefreshRequested = true;
+  clearTimeout(cloudSyncTimer);
+  if(!cloudSyncInFlight){
+    cloudSyncInFlight = runCloudSyncLoop().finally(() => {
+      cloudSyncInFlight = null;
+      renderCloudStatus();
+    });
+  }
   return cloudSyncInFlight;
 }
 
 async function runCloudSyncLoop(){
-  clearTimeout(cloudSyncTimer);
-  while(cloudEnabled && cloudPendingWrite){
-    if(!navigator.onLine){
-      setCloudStatus('offline', 'Changes are saved on this device and queued for encrypted upload.');
-      return;
+  let conflicts = 0;
+  try{
+    if(!navigator.onLine || (!cloudEnabled && (!await verifyCloudAccess() || !cloudEnabled))){
+      setCloudStatus('offline', 'Changes stay on this device until the cloud is reachable.');
+      return false;
     }
-    const pending = cloudPendingWrite;
-    cloudPendingWrite = null;
-    if(cloudBaseSnapshot && snapshotContentEqual(pending.snapshot, cloudBaseSnapshot)) continue;
-    setCloudStatus('syncing', 'Encrypting and saving the newest device state…');
-
-    try{
+    while(cloudRefreshRequested){
+      cloudRefreshRequested = false;
+      setCloudStatus('syncing', 'Checking for newer changes from your other devices?');
+      await reconcileCloudState(await fetchCloudState());
+      if(peerClearingDevice) return false;
+      lastCloudRefreshAt = Date.now();
+      await refreshDurableState();
+      if(persistInFlight){
+        cloudRefreshRequested = true;
+        continue;
+      }
+      // Use the copy covered by the local save, including any concurrent local edits.
+      const snapshot = durableBaseSnapshot;
+      if(cloudBaseSnapshot && snapshotContentEqual(snapshot, cloudBaseSnapshot)) continue;
+      validateSyncCollections(snapshot.data);
+      const body = JSON.stringify({ baseRevision:cloudRevision, operationId:'op_' + uid() + '_' + uid(), snapshot });
+      if(new TextEncoder().encode(body).length > MAX_SYNC_BYTES) throw new Error('SYNC_SIZE_LIMIT');
       const response = await fetchWithTimeout('/api/sync', {
         method:'PUT',
         credentials:'same-origin',
         cache:'no-store',
         headers:{ 'Content-Type':'application/json', 'Accept':'application/json' },
-        body:JSON.stringify({
-          baseRevision:cloudRevision,
-          operationId:pending.operationId,
-          snapshot:pending.snapshot
-        })
+        body
       }, 20000);
       const payload = await response.json().catch(() => ({}));
       if(response.status === 401){
         cloudEnabled = false;
         window.location.replace('/login');
-        return;
+        return false;
       }
-      if(response.status === 409){
-        await reconcileCloudState(payload);
+      if(response.status === 409 && ++conflicts <= 5){
+        cloudRefreshRequested = true;
         continue;
       }
-      if(!response.ok) throw new Error(payload.error || 'CLOUD_WRITE_FAILED');
-
-      cloudRevision = payload.cloudRevision;
-      cloudLastSyncedAt = payload.updatedAt;
-      cloudBaseSnapshot = cloneJson(pending.snapshot);
-      await writeCloudBaseRecord();
-    }catch(e){
-      if(!cloudPendingWrite) cloudPendingWrite = pending;
-      setCloudStatus(
-        navigator.onLine ? 'error' : 'offline',
-        navigator.onLine
-          ? 'Cloud save did not complete. The change remains safely queued on this device.'
-          : 'Changes are saved on this device and will upload after reconnection.'
-      );
-      return;
+      if(!response.ok || !Number.isSafeInteger(payload.cloudRevision) || payload.cloudRevision <= cloudRevision){
+        throw new Error(payload.error || 'CLOUD_WRITE_FAILED');
+      }
+      conflicts = 0;
+      await recordCloudBase(payload.cloudRevision, snapshot, payload.updatedAt, snapshot.revision);
+      if(persistInFlight || !snapshotContentEqual(snapshot, durableBaseSnapshot)) cloudRefreshRequested = true;
     }
-  }
-
-  if(cloudEnabled && !cloudPendingWrite){
     const when = cloudLastSyncedAt
       ? new Date(cloudLastSyncedAt).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' })
       : 'just now';
-    setCloudStatus('synced', `Last confirmed ${when}. Postgres holds encrypted ciphertext; this device keeps the offline copy.`);
-  }
-}
-
-async function syncCloudNow(){
-  const button = document.getElementById('cloudSyncBtn');
-  if(button) button.disabled = true;
-  try{
-    if(persistInFlight) await persistInFlight;
-    if(!cloudEnabled && !await verifyCloudAccess()) return false;
-    setCloudStatus('syncing', 'Checking for newer changes from your other devices…');
-    await reconcileCloudState(await fetchCloudState());
-    lastCloudRefreshAt = Date.now();
-    queueCloudSnapshot(buildSnapshot());
-    await flushCloudSync();
-    if(cloudPendingWrite) return false;
-    return cloudStatusMode === 'synced';
-  }catch(e){
-    setCloudStatus('error', 'Sync did not complete. Your on-device data was not removed or overwritten.');
+    setCloudStatus('synced', 'Last confirmed ' + when + '. Postgres holds encrypted ciphertext; this device keeps the offline copy.');
+    return true;
+  }catch(error){
+    const message = error.message === 'SYNC_SIZE_LIMIT' || error.message === 'PAYLOAD_TOO_LARGE'
+      ? 'This ledger exceeds the cloud size limit. Export a complete backup to keep a portable copy.'
+      : (error.code === 'SYNC_COLLECTION_LIMIT'
+        ? error.message + ' Your local ledger is still available for export.'
+        : 'Sync did not complete. Tally will check both copies again on the next sync.');
+    setCloudStatus(navigator.onLine ? 'error' : 'offline', message);
     return false;
-  }finally{
-    if(button) button.disabled = false;
   }
 }
 
@@ -1775,18 +1978,19 @@ function closeDeviceDatabase(){
 }
 
 function clearTallyLocalStorage(){
-  if(!canUseLocalStorage) return;
-  [
+  const keys = [
     FALLBACK_STATE_KEY, FALLBACK_PREVIOUS_KEY, EMERGENCY_STATE_KEY,
     RECOVERY_STATE_KEY, CLOUD_BASE_FALLBACK_KEY, TRUSTED_DEVICE_FALLBACK_KEY,
+    ...LEGACY_LOCAL_SNAPSHOTS.map(([key]) => key), LEGACY_CLOUD_BASE_FALLBACK_KEY,
     'tally-data', 'tally-settings'
-  ].forEach(key => {
-    try{ window.localStorage.removeItem(key); }catch(e){}
-  });
+  ];
+  for(const key of keys) window.localStorage.removeItem(key);
 }
 
 function deleteDeviceDatabase(){
+  if(!window.indexedDB) return Promise.resolve();
   return new Promise((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(DB_NAME);
     let settled = false;
     const timeout = setTimeout(() => {
       if(!settled){
@@ -1794,7 +1998,6 @@ function deleteDeviceDatabase(){
         reject(new Error('DATABASE_DELETE_BLOCKED'));
       }
     }, 2500);
-    const request = indexedDB.deleteDatabase(DB_NAME);
     request.onsuccess = () => {
       if(settled) return;
       settled = true;
@@ -1811,38 +2014,55 @@ function deleteDeviceDatabase(){
 }
 
 async function signOutAndClearDevice(){
+  if(clearingDevice || peerClearingDevice) return;
   const confirmed = await showConfirm(
     'Sync the latest ledger, sign out, and remove Tally’s on-device database from this browser? Your encrypted cloud copy and exported backups stay intact.',
     'Sign out'
   );
   if(!confirmed) return;
-  if(!await syncCloudNow()){
-    showStorageBanner('Sign-out cleanup stopped because cloud sync could not be confirmed. Your device copy is still intact.');
-    return;
-  }
 
+  clearingDevice = true;
+  let signedOut = false;
+  const loading = document.getElementById('loadingScreen');
+  loading.textContent = 'Syncing before signing out…';
+  loading.style.display = 'flex';
   try{
     if(syncChannel) syncChannel.postMessage({ type:'prepare-clear-device', writerId:CLIENT_ID });
-    const response = await fetch('/api/auth/sign-out', {
+    if(!await syncCloudNow()) throw new Error('SYNC_NOT_CONFIRMED');
+    const response = await fetchWithTimeout('/api/auth/sign-out', {
       method:'POST',
       credentials:'same-origin',
       headers:{ 'Content-Type':'application/json' },
       body:'{}'
     });
     if(!response.ok) throw new Error('SIGN_OUT_FAILED');
+    signedOut = true;
 
-    closeDeviceDatabase();
-    await deleteDeviceDatabase();
-    clearTallyLocalStorage();
+    await withPersistenceLock(async () => {
+      await refreshDurableState();
+      if(!snapshotContentEqual(durableBaseSnapshot, cloudBaseSnapshot)){
+        throw new Error('LOCAL_STATE_CHANGED_AFTER_SYNC');
+      }
+      closeDeviceDatabase();
+      await deleteDeviceDatabase();
+      clearTallyLocalStorage();
+    });
+    appReady = false;
     if('caches' in window){
-      const names = await caches.keys();
-      await Promise.all(names.filter(name => name.startsWith('tally-')).map(name => caches.delete(name)));
+      try{
+        const names = await caches.keys();
+        await Promise.all(names.filter(name => name.startsWith('tally-')).map(name => caches.delete(name)));
+      }catch(e){}
     }
     if(syncChannel) syncChannel.postMessage({ type:'clear-device', writerId:CLIENT_ID });
     window.location.replace('/login');
   }catch(e){
     if(syncChannel) syncChannel.postMessage({ type:'cancel-clear-device', writerId:CLIENT_ID });
-    showStorageBanner('Tally signed out, but the browser could not confirm removal of every local cache. Close other Tally tabs, sign in, and try again—or clear this site’s data in browser settings.');
+    if(!signedOut) clearingDevice = false;
+    loading.style.display = 'none';
+    showStorageBanner(signedOut
+      ? 'Signed out. Tally could not confirm device cleanup. Sign in and sync any remaining changes before retrying.'
+      : 'Sign-out cleanup stopped. Your device copy is still available. Check sync and try again.');
   }
 }
 
@@ -1907,7 +2127,7 @@ function resolveConfirm(result){
 /* ================= actions ================= */
 function logHabit(id){
   const h = habits.find(x => x.id === id);
-  if(!h) return;
+  if(!h || !canAddRecord('entries', entries)) return;
   const date = activeLedgerDate();
   const pts = h.type === 'good' ? Math.max(1, Math.round(h.points)) : -Math.abs(h.points);
   const entry = { id: uid(), date, name: h.name, type: h.type, points: pts, ts: timestampForLedgerDate(date), habitId: h.id };
@@ -1920,7 +2140,7 @@ function logHabit(id){
 
 function logBonus(id){
   const b = bonusTasks.find(x => x.id === id);
-  if(!b) return;
+  if(!b || !canAddRecord('entries', entries)) return;
   const date = activeLedgerDate();
   const entry = { id: uid(), date, name: b.name, type: 'bonus', points: Math.abs(b.points), ts: timestampForLedgerDate(date), bonusId: b.id };
   entries.push(entry);
@@ -1933,14 +2153,16 @@ function setExplicitCompletion(date, shouldComplete){
   if(!isValidDateKey(date) || date < statsStartKey() || date > todayKey()) return;
   const existing = explicitCompletionForDate(date);
   if(shouldComplete && !existing){
+    if(!canAddRecord('completedDays', completedDays)) return false;
     completedDays.push({ id:completedDayId(date), date, ts:timestampForLedgerDate(date) });
   }else if(!shouldComplete && existing){
     completedDays = completedDays.filter(day => day.date !== date);
   }else{
-    return;
+    return false;
   }
   persistData();
   renderAll();
+  return true;
 }
 function toggleDayCompletion(date){
   const target = date || todayKey();
@@ -1948,7 +2170,7 @@ function toggleDayCompletion(date){
   if(existing){
     const saved = { ...existing };
     setExplicitCompletion(target, false);
-    showUndoAction(`Marked ${target} untracked`, () => {
+    showUndoAction(isDayTracked(target) ? `Removed completion mark · ${target}` : `Marked ${target} untracked`, () => {
       if(!explicitCompletionForDate(target)){
         completedDays.push(saved);
         persistData();
@@ -1956,7 +2178,7 @@ function toggleDayCompletion(date){
       }
     });
   }else{
-    setExplicitCompletion(target, true);
+    if(!setExplicitCompletion(target, true)) return;
     showUndoAction(`Completed · ${target}`, () => setExplicitCompletion(target, false));
   }
 }
@@ -2003,44 +2225,33 @@ function deleteEntry(entryId, offerUndo){
 // entries get removed at once.
 function recomputeHabitStreak(habit){
   const sameNameGoodHabits = habits.filter(h => h.type === 'good' && h.name === habit.name);
-  const dates = [...new Set(
+  const start = statsStartKey();
+  const end = todayKey();
+  const dates = new Set(
     entries
-      .filter(e => e.type === 'good' && isInStatsWindow(e.date) && (
+      .filter(e => e.type === 'good' && e.date >= start && e.date <= end && (
         e.habitId
           ? e.habitId === habit.id
           : (sameNameGoodHabits.length === 1 && e.name === habit.name)
       ))
       .map(e => e.date)
-  )].sort();
+  );
+  assignHabitStreak(habit, dates);
+}
 
-  if(dates.length === 0){
-    habit.streak = 0;
-    habit.lastDate = null;
-    return;
-  }
-
-  const lastDate = dates[dates.length - 1];
-  let streak = 1;
-  let cursor = lastDate;
-  for(let i = dates.length - 2; i >= 0; i--){
-    const expectedPrev = addDaysToKey(cursor, -1);
-    if(dates[i] === expectedPrev){
-      streak++;
-      cursor = expectedPrev;
-    } else {
-      break;
-    }
+function assignHabitStreak(habit, dates){
+  let lastDate = null;
+  for(const date of dates || []){
+    if(lastDate === null || date > lastDate) lastDate = date;
   }
   habit.lastDate = lastDate;
-  habit.streak = streak;
+  habit.streak = consecutiveHabitDays(dates, lastDate);
 }
 
 function recomputeAllHabitStreaks(){
-  habits.filter(habit => habit.type === 'good').forEach(recomputeHabitStreak);
-  habits.filter(habit => habit.type !== 'good').forEach(habit => {
-    habit.streak = 0;
-    habit.lastDate = null;
-  });
+  if(!habits.length) return;
+  const { creditDates } = taskActivity('habit', todayKey());
+  habits.forEach(habit => assignHabitStreak(habit, creditDates.get(habit.id)));
 }
 
 /* ---- habit modal ---- */
@@ -2131,6 +2342,7 @@ function saveHabit(){
       else { h.streak = 0; h.lastDate = null; }
     }
   } else {
+    if(!canAddRecord('habits', habits, 'habitError')) return;
     habits.push({
       id: uid(), name, type: habitTypeDraft, points, streak:0, lastDate:null,
       order:nextTaskOrder('habit', sectionId), sectionId
@@ -2193,6 +2405,7 @@ function saveBonus(){
     if(sectionIdValue(b.sectionId) !== sectionId) b.order = nextTaskOrder('bonus', sectionId, b.id);
     b.name = name; b.points = points; b.sectionId = sectionId;
   } else {
+    if(!canAddRecord('bonusTasks', bonusTasks, 'bonusError')) return;
     bonusTasks.push({ id:uid(), name, points, order:nextTaskOrder('bonus', sectionId), sectionId });
   }
   persistData();
@@ -2249,6 +2462,7 @@ function saveTaskSection(){
     if(!section) return showFieldError('taskSectionError', 'This section no longer exists. Close and try again.');
     section.name = name;
   }else{
+    if(!canAddRecord('taskSections', taskSections, 'taskSectionError')) return;
     taskSections.push({
       id:uid(), name, kind:taskSectionKindDraft,
       order:nextTaskSectionOrder(taskSectionKindDraft)
@@ -2278,6 +2492,58 @@ async function deleteTaskSectionConfirm(){
   persistData();
   closeTaskSectionModal();
   renderAll();
+}
+
+/* ---- automatic daily bonuses ---- */
+function openDailyBonusModal(id){
+  const bonus = id ? dailyBonuses.find(item => item.id === id) : null;
+  if(id && !bonus) return;
+  editingDailyBonusId = id || null;
+  clearFieldError('dailyBonusError');
+  document.getElementById('dailyBonusModalTitle').textContent = id ? 'Edit automatic daily bonus' : 'Add automatic daily bonus';
+  document.getElementById('dailyBonusName').value = bonus?.name || '';
+  document.getElementById('dailyBonusPoints').value = bonus?.points || '';
+  document.getElementById('dailyBonusDescription').value = bonus?.description || '';
+  document.getElementById('deleteDailyBonusBtn').style.display = id ? 'block' : 'none';
+  openDialog('dailyBonusOverlay', 'dailyBonusName');
+}
+function closeDailyBonusModal(){
+  closeDialog('dailyBonusOverlay');
+  editingDailyBonusId = null;
+}
+function saveDailyBonus(){
+  const name = document.getElementById('dailyBonusName').value.trim();
+  const points = Number(document.getElementById('dailyBonusPoints').value);
+  const description = document.getElementById('dailyBonusDescription').value.trim();
+  clearFieldError('dailyBonusError');
+  if(!name || name.length > 60) return showFieldError('dailyBonusError', 'Enter a name of up to 60 characters.', 'dailyBonusName');
+  if(!Number.isInteger(points) || points < 1 || points > 9999){
+    return showFieldError('dailyBonusError', 'Reward points must be a whole number from 1 to 9,999.', 'dailyBonusPoints');
+  }
+  if(description.length > 160){
+    return showFieldError('dailyBonusError', 'Keep the description to 160 characters or fewer.', 'dailyBonusDescription');
+  }
+  if(editingDailyBonusId){
+    const bonus = dailyBonuses.find(item => item.id === editingDailyBonusId);
+    if(!bonus) return showFieldError('dailyBonusError', 'This daily bonus no longer exists. Close and try again.');
+    Object.assign(bonus, { name, points, description });
+  }else{
+    if(!canAddRecord('dailyBonuses', dailyBonuses, 'dailyBonusError')) return;
+    dailyBonuses.push({ id:uid(), name, points, description });
+  }
+  persistData();
+  closeDailyBonusModal();
+  renderAll();
+}
+async function deleteDailyBonusConfirm(){
+  const bonus = dailyBonuses.find(item => item.id === editingDailyBonusId);
+  if(!bonus) return;
+  if(await showConfirm(`Delete “${bonus.name}”? Every automatic award generated by it will be removed retroactively.`, 'Delete daily bonus')){
+    dailyBonuses = dailyBonuses.filter(item => item.id !== bonus.id);
+    persistData();
+    closeDailyBonusModal();
+    renderAll();
+  }
 }
 
 /* ---- automatic success milestones ---- */
@@ -2333,6 +2599,7 @@ function saveMilestone(){
     milestone.points = points;
     milestone.description = description;
   }else{
+    if(!canAddRecord('milestones', milestones, 'milestoneError')) return;
     milestones.push({ id:uid(), name, days, points, description });
   }
   persistData();
@@ -2404,6 +2671,7 @@ function saveSettings(){
   successThreshold = threshold;
   dayStartHour = dayStart;
   trackingStartDate = startDate;
+  updateLedgerDay();
   if([0,1,3,7,14,30].includes(reminder)) backupReminderDays = reminder;
   reminderDismissedThisSession = false; // let a freshly chosen cadence show if already due
   recomputeAllHabitStreaks();
@@ -2438,7 +2706,7 @@ function markBackupCompleted(exportedAt){
 }
 
 function hasAnyLedgerData(){
-  return entries.length || habits.length || bonusTasks.length || taskSections.length || milestones.length || completedDays.length;
+  return entries.length || habits.length || bonusTasks.length || dailyBonuses.length || taskSections.length || milestones.length || completedDays.length;
 }
 function describeDaysSince(iso){
   const ms = new Date(iso).getTime();
@@ -2480,6 +2748,7 @@ function ledgerCountsSentence(){
     `${taskSections.length} topic/bonus section${taskSections.length === 1 ? '' : 's'}`,
     `${habits.length} habit${habits.length === 1 ? '' : 's'}`,
     `${bonusTasks.length} bonus entr${bonusTasks.length === 1 ? 'y' : 'ies'}`,
+    `${dailyBonuses.length} automatic daily bonus${dailyBonuses.length === 1 ? '' : 'es'}`,
     `${milestones.length} milestone${milestones.length === 1 ? '' : 's'}`,
     `${completedDays.length} completed-day mark${completedDays.length === 1 ? '' : 's'}`,
     `${entries.length} logged entr${entries.length === 1 ? 'y' : 'ies'}`
@@ -2530,7 +2799,7 @@ function setBackupStatus(message, tone){
   el.className = `status-message${tone ? ` ${tone}` : ''}`;
 }
 function backupContentsLabel(clean){
-  return `${clean.taskSections.length} topic/bonus section${clean.taskSections.length === 1 ? '' : 's'}, ${clean.habits.length} habit${clean.habits.length === 1 ? '' : 's'}, ${clean.bonusTasks.length} bonus entr${clean.bonusTasks.length === 1 ? 'y' : 'ies'}, ${clean.milestones.length} milestone${clean.milestones.length === 1 ? '' : 's'}, ${clean.completedDays.length} completed day${clean.completedDays.length === 1 ? '' : 's'}, and ${clean.entries.length} logged entr${clean.entries.length === 1 ? 'y' : 'ies'}`;
+  return `${clean.taskSections.length} topic/bonus section${clean.taskSections.length === 1 ? '' : 's'}, ${clean.habits.length} habit${clean.habits.length === 1 ? '' : 's'}, ${clean.bonusTasks.length} bonus entr${clean.bonusTasks.length === 1 ? 'y' : 'ies'}, ${clean.dailyBonuses.length} automatic daily bonus${clean.dailyBonuses.length === 1 ? '' : 'es'}, ${clean.milestones.length} milestone${clean.milestones.length === 1 ? '' : 's'}, ${clean.completedDays.length} completed day${clean.completedDays.length === 1 ? '' : 's'}, and ${clean.entries.length} logged entr${clean.entries.length === 1 ? 'y' : 'ies'}`;
 }
 function triggerFileDownload(file){
   const url = URL.createObjectURL(file);
@@ -2594,7 +2863,7 @@ function csvCell(value, protectFormula){
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-const FULL_CSV_BACKUP_VERSION = '6';
+const FULL_CSV_BACKUP_VERSION = '7';
 const FULL_CSV_V1_HEADERS = [
   'format_version','record_type','revision','writer_id','id','name_json','type',
   'points','streak','last_date','ledger_date','timestamp_ms','habit_id','bonus_id',
@@ -2661,6 +2930,13 @@ function buildFullCsvBackup(){
       points:bonus.points,
       manual_order:bonus.order,
       section_id:bonus.sectionId || ''
+    })),
+    ...snapshot.data.dailyBonuses.map(bonus => fullCsvRow({
+      record_type:'daily_bonus',
+      id:bonus.id,
+      name_json:JSON.stringify(bonus.name),
+      points:bonus.points,
+      description_json:JSON.stringify(bonus.description || '')
     })),
     ...snapshot.data.milestones.map(milestone => fullCsvRow({
       record_type:'milestone',
@@ -2816,7 +3092,7 @@ function parseFullCsvBackup(raw){
   const meta = metaRows[0];
   assertCsvFields(meta.values, ['format_version','record_type','revision','writer_id','exported_at'], meta.rowNumber, headers);
   const expectedVersion = headers === FULL_CSV_HEADERS
-    ? FULL_CSV_BACKUP_VERSION
+    ? (meta.values.format_version === '6' ? '6' : FULL_CSV_BACKUP_VERSION)
     : (headers === FULL_CSV_V5_HEADERS
       ? '5'
       : (headers === FULL_CSV_V4_HEADERS
@@ -2847,6 +3123,7 @@ function parseFullCsvBackup(raw){
 
   const habits = [];
   const bonusTasks = [];
+  const restoredDailyBonuses = [];
   const restoredTaskSections = [];
   const restoredMilestones = [];
   const restoredCompletedDays = [];
@@ -2906,6 +3183,15 @@ function parseFullCsvBackup(raw){
       if(value.habit_id) entry.habitId = value.habit_id;
       if(value.bonus_id) entry.bonusId = value.bonus_id;
       restoredEntries.push(entry);
+    }else if(value.record_type === 'daily_bonus'){
+      if(expectedVersion !== '7') throw new Error(`Row ${record.rowNumber} has an unsupported record type.`);
+      assertCsvFields(value, ['record_type','id','name_json','points','description_json'], record.rowNumber, headers);
+      restoredDailyBonuses.push({
+        id:value.id,
+        name:csvBackupName(value.name_json, record.rowNumber),
+        points:csvBackupInteger(value.points, `Row ${record.rowNumber} points`, 1, 9999),
+        description:csvBackupName(value.description_json, record.rowNumber)
+      });
     }else if(value.record_type === 'milestone'){
       if(headers === FULL_CSV_V1_HEADERS) throw new Error(`Row ${record.rowNumber} has an unsupported record type.`);
       assertCsvFields(value, [
@@ -2940,6 +3226,7 @@ function parseFullCsvBackup(raw){
       taskSections:restoredTaskSections,
       habits,
       bonusTasks,
+      dailyBonuses:restoredDailyBonuses,
       milestones:restoredMilestones,
       completedDays:restoredCompletedDays,
       entries:restoredEntries
@@ -2989,7 +3276,7 @@ function downloadCsvBackup(){
 }
 
 function buildActivityCsv(){
-  const headers = ['ledger_date','logged_at','name','type','points','included_in_statistics','source','entry_id','habit_id','bonus_id','milestone_id'];
+  const headers = ['ledger_date','logged_at','name','type','points','included_in_statistics','source','entry_id','habit_id','bonus_id','milestone_id','daily_bonus_id'];
   const rows = allActivityEntries()
     .slice()
     .sort((a, b) => a.date.localeCompare(b.date) || a.ts - b.ts || a.id.localeCompare(b.id))
@@ -3000,11 +3287,12 @@ function buildActivityCsv(){
       entry.type,
       Number(entry.points) || 0,
       isInStatsWindow(entry.date) ? 'true' : 'false',
-      entry.derived ? 'automatic_milestone' : 'manual',
+      entry.dailyBonusId ? 'automatic_daily_bonus' : (entry.derived ? 'automatic_milestone' : 'manual'),
       entry.id,
       entry.habitId || '',
       entry.bonusId || '',
-      entry.milestoneId || ''
+      entry.milestoneId || '',
+      entry.dailyBonusId || ''
     ]);
   return '\uFEFF' + [headers, ...rows]
     .map(row => row.map((value, index) => csvCell(value, index === 2)).join(','))
@@ -3038,7 +3326,6 @@ async function restoreValidatedBackup(clean, formatLabel){
   }
   applyValidatedState(clean);
   stateRevision = Math.max(priorRevision, clean.revision);
-  durableRevision = priorRevision;
   await schedulePersist();
   closeBackup();
   renderAll();
@@ -3094,6 +3381,7 @@ function mergeAddCounts(clean){
     taskSections: countNewById(taskSections, clean.taskSections),
     habits: countNewById(habits, clean.habits),
     bonusTasks: countNewById(bonusTasks, clean.bonusTasks),
+    dailyBonuses: countNewById(dailyBonuses, clean.dailyBonuses),
     milestones: countNewById(milestones, clean.milestones),
     completedDays: countNewById(completedDays, clean.completedDays),
     entries: countNewById(entries, clean.entries)
@@ -3111,6 +3399,7 @@ function mergeImportedState(clean){
       taskSections:unionById(taskSections, clean.taskSections),
       habits:unionById(habits, clean.habits),
       bonusTasks:unionById(bonusTasks, clean.bonusTasks),
+      dailyBonuses:unionById(dailyBonuses, clean.dailyBonuses),
       milestones:unionById(milestones, clean.milestones),
       completedDays:unionById(completedDays, clean.completedDays),
       entries:unionById(entries, clean.entries)
@@ -3127,7 +3416,7 @@ function mergeImportedState(clean){
 async function mergeValidatedBackup(clean, formatLabel){
   const label = formatLabel || 'backup';
   const adds = mergeAddCounts(clean);
-  const total = adds.entries + adds.habits + adds.bonusTasks + adds.taskSections + adds.milestones + adds.completedDays;
+  const total = adds.entries + adds.habits + adds.bonusTasks + adds.dailyBonuses + adds.taskSections + adds.milestones + adds.completedDays;
   if(total === 0){
     setBackupStatus(`Nothing to merge — every item in that ${label} is already in your ledger.`, 'success');
     return;
@@ -3137,6 +3426,7 @@ async function mergeValidatedBackup(clean, formatLabel){
     `${adds.taskSections} topic/bonus section${adds.taskSections === 1 ? '' : 's'}`,
     `${adds.habits} habit${adds.habits === 1 ? '' : 's'}`,
     `${adds.bonusTasks} bonus entr${adds.bonusTasks === 1 ? 'y' : 'ies'}`,
+    `${adds.dailyBonuses} automatic daily bonus${adds.dailyBonuses === 1 ? '' : 'es'}`,
     `${adds.milestones} milestone${adds.milestones === 1 ? '' : 's'}`,
     `${adds.completedDays} completed day${adds.completedDays === 1 ? '' : 's'}`
   ];
@@ -3159,7 +3449,6 @@ async function mergeValidatedBackup(clean, formatLabel){
   }
   applyValidatedState(mergedClean);
   stateRevision = Math.max(priorRevision, clean.revision || 0) + 1;
-  durableRevision = priorRevision;
   await schedulePersist();
   closeBackup();
   renderAll();
@@ -3196,13 +3485,13 @@ async function doMergeCsv(){
   return mergeValidatedBackup(clean, 'CSV backup');
 }
 async function clearLedgerData(){
-  const ok = await showConfirm(`Clear all habits, bonus entries, milestones, completed-day marks, and logged history? You'll lose ${ledgerCountsSentence()}. Your scoring settings will stay unchanged.`, 'Clear ledger');
+  const ok = await showConfirm(`Clear all habits, bonus entries, automatic daily bonuses, milestones, completed-day marks, and logged history? You'll lose ${ledgerCountsSentence()}. Your scoring settings will stay unchanged.`, 'Clear ledger');
   if(ok){
     if(!await saveRecoverySnapshot('before-clear-ledger', buildSnapshot())){
       showSaveWarning();
       return;
     }
-    habits = []; bonusTasks = []; taskSections = []; milestones = []; completedDays = []; entries = [];
+    habits = []; bonusTasks = []; dailyBonuses = []; taskSections = []; milestones = []; completedDays = []; entries = [];
     await persistData();
     renderAll();
   }
@@ -3270,29 +3559,36 @@ function returnToToday(){
 }
 
 function renderAll(didLog){
+  scheduleNextDayRefresh();
+  const ledger = summarizeLedger();
   renderTodayNavigator();
-  renderHeader(didLog);
+  renderHeader(didLog, ledger);
   renderCompletionControl(activeLedgerDate(), 'todayCompletionControl');
-  renderActivityLog();
+  renderActivityLog(ledger);
   renderSortSelect('habit');
   renderSortSelect('bonus');
   renderHabitList();
   renderBonusList();
+  renderDailyBonusList();
   renderMilestoneList();
-  renderHistory();
-  renderStats();
-  renderTrends();
+  renderHistory(ledger);
+  renderStats(ledger);
+  renderTrends(ledger);
   renderBackupDate();
   updateBackupReminder();
   renderResetPreview();
   renderCloudStatus();
   if(selectedDayKey && document.getElementById('dayOverlay').classList.contains('show')){
-    renderDayActivity();
+    renderDayActivity(ledger);
   }
 }
 
-function todayEntries(date = activeLedgerDate()){
-  return allActivityEntries(date).filter(entry => entry.date === date);
+function activityEntriesForDate(date, ledger, manualEntries = entries.filter(entry => entry.date === date)){
+  return [
+    ...manualEntries,
+    ...(ledger.bonusDates.has(date) ? dailyBonusEntriesForDate(date) : []),
+    ...milestoneEntriesForDate(date, ledger.milestoneAwards.get(date))
+  ];
 }
 
 function renderCompletionControl(date, elementId){
@@ -3304,15 +3600,15 @@ function renderCompletionControl(date, elementId){
     el.innerHTML = `<div class="completion-card tracked">
       <span class="completion-copy">
         <span class="completion-title">✓ Day marked complete</span>
-        <span class="completion-sub">${hasActivity ? 'Activity also keeps this day tracked.' : `Tracked at the ${dailyBase} baseline with no manual activity.`}</span>
+        <span class="completion-sub">${hasActivity ? 'Activity also keeps this day tracked.' : (hasDailyBonusForDate(date) ? 'An automatic daily bonus also keeps this day tracked.' : `Tracked at the ${dailyBase} baseline with no manual activity.`)}</span>
       </span>
       <button type="button" class="completion-button undo" data-action="toggle-day-complete" data-date="${date}">Undo</button>
     </div>`;
-  }else if(hasActivity){
+  }else if(hasActivity || hasDailyBonusForDate(date)){
     el.innerHTML = `<div class="completion-card tracked">
       <span class="completion-copy">
-        <span class="completion-title">✓ Tracked from activity</span>
-        <span class="completion-sub">No separate completion tap is needed for this day.</span>
+        <span class="completion-title">✓ Tracked from ${hasActivity ? 'activity' : 'automatic daily bonus'}</span>
+        <span class="completion-sub">${hasActivity ? 'No separate completion tap is needed for this day.' : 'No debits recorded. Adding a debit removes the daily bonus.'}</span>
       </span>
     </div>`;
   }else{
@@ -3344,7 +3640,7 @@ function switchView(view){
   renderHeader();
 }
 
-function renderHeader(didLog){
+function renderHeader(didLog, ledger = summarizeLedger()){
   // Label the ledger day itself (which may still be "yesterday" until 7am), not
   // whatever the calendar says right now — otherwise the header could say Tuesday
   // while the score underneath is still Monday's, until the 7am rollover catches up.
@@ -3353,13 +3649,11 @@ function renderHeader(didLog){
   document.getElementById('dateLabel').textContent =
     ledgerDate.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' }).toUpperCase();
 
-  const todays = todayEntries(shownDate);
-  const net = todays.reduce((s,e) => s + (Number(e.points) || 0), 0);
-  const manualNet = entries.filter(entry => entry.date === shownDate).reduce((sum, entry) => sum + (Number(entry.points) || 0), 0);
+  const net = ledger.byDate[shownDate] || 0;
+  const manualNet = ledger.manualByDate[shownDate] || 0;
   const score = dailyBase + net;
-  const allTime = allActivityEntries()
-    .filter(entry => isInStatsWindow(entry.date))
-    .reduce((sum, entry) => sum + (Number(entry.points) || 0), 0);
+  const qualifyingScore = dailyBase + manualNet;
+  const allTime = Object.values(ledger.byDate).reduce((sum, points) => sum + points, 0);
 
   const scoreEl = document.getElementById('scoreEl');
   const statusEl = document.getElementById('statusEl');
@@ -3378,14 +3672,14 @@ function renderHeader(didLog){
   if(!dayTracked){
     successEl.textContent = 'Untracked · log activity or mark complete';
     successEl.className = 'success-tag';
-  }else if(dailyBase + manualNet >= successThreshold){
+  }else if(qualifyingScore >= successThreshold){
     successEl.textContent = `✓ Success day (≥${successThreshold})`;
     successEl.className = 'success-tag success';
   } else {
-    successEl.textContent = `${successThreshold - (dailyBase + manualNet)} to go for a success day`;
+    successEl.textContent = `${successThreshold - qualifyingScore} to go for a success day`;
     successEl.className = 'success-tag';
   }
-  const progress = successThreshold <= 0 ? 100 : Math.max(0, Math.min(100, Math.round((score / successThreshold) * 100)));
+  const progress = successThreshold <= 0 ? 100 : Math.max(0, Math.min(100, Math.round((qualifyingScore / successThreshold) * 100)));
   document.getElementById('thresholdProgressEl').style.width = `${progress}%`;
 
   if(didLog){
@@ -3395,12 +3689,12 @@ function renderHeader(didLog){
   }
 }
 
-function renderTaskGroups(kind, rowRenderer){
+function renderTaskGroups(kind, usage, rowRenderer){
   const customSections = sectionsForKind(kind);
   if(customSections.length === 0){
-    return `<div class="task-group-list plain" data-task-drop-zone data-kind="${kind}" data-section-id="">${sortedTaskItems(kind, null).map(rowRenderer).join('')}</div>`;
+    return `<div class="task-group-list plain" data-task-drop-zone data-kind="${kind}" data-section-id="">${sortedTaskItems(kind, null, usage).map(rowRenderer).join('')}</div>`;
   }
-  const unsectionedItems = sortedTaskItems(kind, null);
+  const unsectionedItems = sortedTaskItems(kind, null, usage);
   const groups = [
     ...(unsectionedItems.length ? [{
       id:null,
@@ -3408,7 +3702,7 @@ function renderTaskGroups(kind, rowRenderer){
       editable:false,
       list:unsectionedItems
     }] : []),
-    ...customSections.map(section => ({ ...section, editable:true, list:sortedTaskItems(kind, section.id) }))
+    ...customSections.map(section => ({ ...section, editable:true, list:sortedTaskItems(kind, section.id, usage) }))
   ];
   return groups.map(group => {
     const list = group.list;
@@ -3434,10 +3728,13 @@ function renderHabitList(){
   }
   const date = activeLedgerDate();
   const countLabel = date === todayKey() ? 'today' : 'this day';
-  el.innerHTML = renderTaskGroups('habit', h => {
+  const previousDate = addDaysToKey(date, -1);
+  const { counts, selectedCounts, creditDates } = taskActivity('habit', date);
+  el.innerHTML = renderTaskGroups('habit', counts, h => {
     const type = h.type;
-    const confirmedStreak = habitStreakThroughDate(h, date);
-    const todaysCount = entries.filter(e => e.date === date && taskMatchesEntry(type, h, e)).length;
+    const dates = creditDates.get(h.id);
+    const confirmedStreak = consecutiveHabitDays(dates, dates?.has(date) ? date : previousDate);
+    const todaysCount = selectedCounts.get(h.id) || 0;
     let sub = '';
     if(type === 'good'){
       if(confirmedStreak >= 2){
@@ -3473,8 +3770,9 @@ function renderBonusList(){
   }
   const date = activeLedgerDate();
   const countLabel = date === todayKey() ? 'today' : 'this day';
-  el.innerHTML = renderTaskGroups('bonus', b => {
-    const todaysCount = entries.filter(e => e.date === date && taskMatchesEntry('bonus', b, e)).length;
+  const { counts, selectedCounts } = taskActivity('bonus', date);
+  el.innerHTML = renderTaskGroups('bonus', counts, b => {
+    const todaysCount = selectedCounts.get(b.id) || 0;
     return `
       <div class="row task-row" data-task-row data-kind="bonus" data-id="${escapeHtml(b.id)}" data-section-id="${escapeHtml(b.sectionId || '')}">
         <button type="button" class="row-main" style="background:none;border:none;text-align:left;padding:0;color:inherit" data-action="log-bonus" data-id="${escapeHtml(b.id)}">
@@ -3486,6 +3784,24 @@ function renderBonusList(){
         ${taskDragHandle('bonus', b)}
       </div>`;
   });
+}
+
+function renderDailyBonusList(){
+  const el = document.getElementById('dailyBonusList');
+  if(!el) return;
+  if(!dailyBonuses.length){
+    el.innerHTML = `<div class="empty">No automatic daily bonuses yet — <button type="button" data-action="open-daily-bonus">add a no-debits reward.</button></div>`;
+    return;
+  }
+  el.innerHTML = dailyBonuses.map(bonus => `
+    <div class="row">
+      <div class="row-main">
+        <div class="row-name">${escapeHtml(bonus.name)}</div>
+        <div class="milestone-meta mono">No debits · +${bonus.points} per day · after ${hourLabel(dayStartHour)}</div>
+        ${bonus.description ? `<div class="row-sub">${escapeHtml(bonus.description)}</div>` : ''}
+      </div>
+      <button type="button" class="edit-btn" data-action="open-daily-bonus" data-id="${escapeHtml(bonus.id)}" aria-label="Edit ${escapeHtml(bonus.name)}">✎</button>
+    </div>`).join('');
 }
 
 function renderMilestoneList(){
@@ -3556,10 +3872,10 @@ function historyDaysForRange(){
   return days;
 }
 
-function averageScoreWindow(dayCount, byDate, end = todayKey()){
+function averageScoreWindow(dayCount, byDate, end = todayKey(), dates = trackedDateKeys(end)){
   const start = laterDateKey(statsStartKey(), addDaysToKey(end, -(dayCount - 1)));
   const calendarDays = calendarDaysInclusive(start, end);
-  const tracked = trackedDateKeys(end).filter(date => date >= start);
+  const tracked = dates.filter(date => date >= start);
   if(tracked.length === 0) return { average:null, tracked:0, calendarDays };
   const total = tracked.reduce((sum, date) => sum + dailyBase + (byDate[date] || 0), 0);
   return { average:total / tracked.length, tracked:tracked.length, calendarDays };
@@ -3573,13 +3889,14 @@ function averageForLastTrackedDays(dayCount, byDate, end = todayKey()){
   return tracked.reduce((sum, date) => sum + dailyBase + (byDate[date] || 0), 0) / tracked.length;
 }
 
-function renderHistoryAverages(byDate){
+function renderHistoryAverages(ledger){
   const el = document.getElementById('historyAverages');
-  const allDays = calendarDaysInclusive(statsStartKey(), todayKey());
+  const { byDate, end, dates } = ledger;
+  const allDays = calendarDaysInclusive(statsStartKey(), end);
   const values = [
-    [averageScoreWindow(7, byDate), '7-day average'],
-    [averageScoreWindow(30, byDate), '30-day average'],
-    [averageScoreWindow(allDays, byDate), 'Since-start average']
+    [averageScoreWindow(7, byDate, end, dates), '7-day average'],
+    [averageScoreWindow(30, byDate, end, dates), '30-day average'],
+    [averageScoreWindow(allDays, byDate, end, dates), 'Since-start average']
   ];
   el.innerHTML = `<div class="metric-group-label">Current averages</div><div class="average-grid">${values.map(([window,label]) =>
     `<div class="average-tile"><div class="average-value mono">${window.average === null ? '—' : Math.round(window.average)}</div><div class="average-label">${label}</div><div class="average-coverage">${window.tracked}/${window.calendarDays} tracked</div></div>`
@@ -3594,24 +3911,23 @@ function chartStepForDeviation(maxDeviation){
   return factor * magnitude;
 }
 
-function renderHistory(){
+function renderHistory(ledger = summarizeLedger()){
   renderRangeButtons();
   renderDateJump();
   const el = document.getElementById('historyChart');
-  const manualByDate = manualDailyTotalsByDate();
-  const byDate = dailyTotalsByDate();
-  renderHistoryAverages(byDate);
+  const { manualByDate, byDate, dates:trackedSeq } = ledger;
+  renderHistoryAverages(ledger);
 
   const days = historyDaysForRange();
   if(!selectedHistoryDate || !days.includes(selectedHistoryDate)){
     selectedHistoryDate = days[days.length - 1];
   }
-  const tracked = days.map(d => isDayTracked(d));
+  const trackedDates = new Set(trackedSeq);
+  const tracked = days.map(date => trackedDates.has(date));
   const scores = days.map((d, index) => tracked[index] ? dailyBase + (byDate[d] || 0) : null);
   // Single sliding-window pass over the tracked sequence. Calling
   // averageForLastTrackedDays() once per rendered day re-scanned every entry each
   // time, which made renderAll() O(days x entries) and froze the UI on wide ranges.
-  const trackedSeq = trackedDateKeys();
   const rollingByDate = Object.create(null);
   let rollSum = 0;
   for(let i = 0; i < trackedSeq.length; i++){
@@ -3778,12 +4094,10 @@ function navigateTrackedDay(direction){
   renderDayActivity();
 }
 
-function renderDayActivity(){
+function renderDayActivity(ledger = summarizeLedger()){
   if(!selectedDayKey) return;
   const date = new Date(selectedDayKey + 'T12:00:00');
-  const dayEntries = allActivityEntries(selectedDayKey)
-    .filter(e => e.date === selectedDayKey)
-    .slice()
+  const dayEntries = activityEntriesForDate(selectedDayKey, ledger)
     .sort((a, b) => b.ts - a.ts);
   const net = dayEntries.reduce((sum, entry) => sum + (Number(entry.points) || 0), 0);
   const score = dailyBase + net;
@@ -3800,7 +4114,7 @@ function renderDayActivity(){
 
   document.getElementById('previousDayBtn').disabled = selectedDayKey <= statsStartKey();
   document.getElementById('nextDayBtn').disabled = selectedDayKey >= todayKey();
-  const trackedDates = trackedDatesInWindow();
+  const trackedDates = ledger.dates;
   document.getElementById('previousTrackedBtn').disabled = !trackedDates.some(day => day < selectedDayKey);
   document.getElementById('nextTrackedBtn').disabled = !trackedDates.some(day => day > selectedDayKey);
   renderCompletionControl(selectedDayKey, 'dayCompletionControl');
@@ -3819,7 +4133,7 @@ function renderDayActivity(){
     const sign = points > 0 ? '+' : '';
     const tone = entry.type === 'bonus' ? 'bonus' : (points < 0 ? 'loss' : '');
     const time = new Date(entry.ts).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
-    const typeLabel = entry.derived ? 'Automatic milestone' : typeLabels[entry.type];
+    const typeLabel = entry.derived ? automaticEntryLabel(entry) : typeLabels[entry.type];
     return `<div class="row">
       <div class="row-main">
         <div class="row-name">${escapeHtml(entry.name)}</div>
@@ -3919,6 +4233,7 @@ function saveEditedEntry(){
   const signedPoints = type === 'bad' ? -pointsMagnitude : pointsMagnitude;
 
   if(entryModalMode === 'create'){
+    if(!canAddRecord('entries', entries, 'entryError')) return;
     if(date < statsStartKey()){
       return showFieldError('entryError', 'That day is before your statistics start date. Move the start date back first if you want to log it.', 'entryDateInput');
     }
@@ -3956,17 +4271,13 @@ function saveEditedEntry(){
   // Keep a source link only when the edited entry remains the same kind of item.
   // Changing its type makes it a standalone historical record rather than silently
   // assigning it to a habit or bonus task that merely has a matching name.
-  if(type === 'good'){
+  if(type === 'good' || type === 'bad'){
     delete entry.bonusId;
-    const linked = entry.habitId && habits.find(h => h.id === entry.habitId && h.type === 'good');
-    if(oldEntry.type !== 'good' || !linked) delete entry.habitId;
+    if(oldEntry.type !== type) delete entry.habitId;
   } else if(type === 'bonus'){
     delete entry.habitId;
     const linked = entry.bonusId && bonusTasks.find(b => b.id === entry.bonusId);
     if(oldEntry.type !== 'bonus' || !linked) delete entry.bonusId;
-  } else {
-    delete entry.habitId;
-    delete entry.bonusId;
   }
 
   const newHabit = linkedGoodHabit(entry);
@@ -3989,24 +4300,12 @@ async function deleteHistoricalEntry(entryId){
   renderDayActivity();
 }
 
-// Groups all entries by date once, since every stat below is derived from daily totals.
-// Number(e.points) guards against a hand-edited restore backup with a non-numeric or
-// missing points field — without it, "0 + a string" silently string-concatenates
-// instead of adding, quietly corrupting every score, streak, and trend derived from it.
 function dailyTotalsByDate(end = todayKey()){
-  const start = statsStartKey();
-  const byDate = Object.create(null);
-  for(const e of allActivityEntries(end)){
-    if(e.date < start || e.date > end) continue;
-    byDate[e.date] = (byDate[e.date] || 0) + (Number(e.points) || 0);
-  }
-  return byDate;
+  return summarizeLedger(end).byDate;
 }
 
-function computeStats(){
-  const manualByDate = manualDailyTotalsByDate();
-  const byDate = dailyTotalsByDate();
-  const dates = trackedDateKeys();
+function computeStats(ledger = summarizeLedger()){
+  const { manualByDate, byDate, dates, end, bonusDates, milestoneAwards } = ledger;
   const daysTracked = dates.length;
 
   if(daysTracked === 0){
@@ -4036,22 +4335,31 @@ function computeStats(){
   // the current streak.
   const currentStreak = run;
 
-  // Top contributors by total points, in either direction — the direct answer to
-  // "what's actually moving the needle." Gains pool credits and bonuses together
-  // (both add points); drains are debits only (the only source of negative points).
-  // Number(e.points) guards the same malformed-backup case as dailyTotalsByDate().
-  function topContributors(types){
-    const totals = {};
-    for(const e of allActivityEntries()){
-      if(!isInStatsWindow(e.date) || !types.includes(e.type)) continue;
-      if(!totals[e.name]) totals[e.name] = { name: e.name, points: 0, count: 0 };
-      totals[e.name].points += Number(e.points) || 0;
-      totals[e.name].count += 1;
-    }
-    return Object.values(totals);
+  const gains = new Map();
+  const drains = new Map();
+  function addContribution(totals, name, points, count = 1){
+    if(!totals.has(name)) totals.set(name, { name, points:0, count:0 });
+    const total = totals.get(name);
+    total.points += points;
+    total.count += count;
   }
-  const biggestGains = topContributors(['good', 'bonus']).sort((a, b) => b.points - a.points).slice(0, 3);
-  const biggestDrains = topContributors(['bad']).sort((a, b) => a.points - b.points).slice(0, 3);
+  const start = statsStartKey();
+  for(const entry of entries){
+    if(entry.date < start || entry.date > end) continue;
+    addContribution(entry.type === 'bad' ? drains : gains, entry.name, Number(entry.points) || 0);
+  }
+  if(bonusDates.size){
+    for(const bonus of dailyBonuses){
+      addContribution(gains, bonus.name, bonus.points * bonusDates.size, bonusDates.size);
+    }
+  }
+  for(const earned of milestoneAwards.values()){
+    for(const milestone of earned){
+      addContribution(gains, milestone.name, milestone.points);
+    }
+  }
+  const biggestGains = [...gains.values()].sort((a, b) => b.points - a.points).slice(0, 3);
+  const biggestDrains = [...drains.values()].sort((a, b) => a.points - b.points).slice(0, 3);
 
   return {
     daysTracked, successRate, currentStreak, bestStreak,
@@ -4060,9 +4368,9 @@ function computeStats(){
   };
 }
 
-function renderStats(){
+function renderStats(ledger){
   const el = document.getElementById('statsGrid');
-  const s = computeStats();
+  const s = computeStats(ledger);
 
   if(s.daysTracked === 0){
     el.innerHTML = `<div class="stat-tile wide"><div class="stat-value">—</div><div class="stat-label">Log activity or mark a day complete to start stats</div></div>`;
@@ -4129,9 +4437,8 @@ function escapeHtml(s){
 const TREND_EARLY_DAYS = 7;
 const PACE_WINDOW_DAYS = 14; // "current pace" = average net over the latest N tracked days
 
-function computeTrends(){
-  const byDate = dailyTotalsByDate();
-  const dates = trackedDateKeys();
+function computeTrends(ledger = summarizeLedger()){
+  const { byDate, dates, end:today } = ledger;
   const daysTracked = dates.length;
   if(daysTracked === 0) return { ready: false, daysTracked };
 
@@ -4140,7 +4447,6 @@ function computeTrends(){
   const dowNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const dowTotals = Array(7).fill(0);
   const dowCounts = Array(7).fill(0);
-  const today = todayKey();
   const observationDays = daysTracked;
   const observationSpanDays = calendarDaysInclusive(statsStartKey(), today);
   for(const date of dates){
@@ -4189,9 +4495,9 @@ function computeTrends(){
   };
 }
 
-function renderTrends(){
+function renderTrends(ledger){
   const el = document.getElementById('trendsBody');
-  const t = computeTrends();
+  const t = computeTrends(ledger);
 
   if(!t.ready){
     el.innerHTML = `<div class="empty">Log activity or mark a day complete and trends will begin immediately.</div>`;
@@ -4306,17 +4612,20 @@ function toggleActivityLog(){
   activityLogOpen = !activityLogOpen;
   renderActivityLog();
 }
-function renderActivityLog(){
+function renderActivityLog(ledger = summarizeLedger()){
   const date = activeLedgerDate();
-  const todays = allActivityEntries(date).filter(e => e.date === date).slice().sort((a, b) => b.ts - a.ts);
+  const manualEntries = entries.filter(entry => entry.date === date);
+  const bonusCount = ledger.bonusDates.has(date) ? dailyBonuses.length : 0;
+  const milestoneCount = ledger.milestoneAwards.get(date)?.length || 0;
 
   document.getElementById('activityToggleBtn').textContent =
-    (activityLogOpen ? 'Hide' : 'Show') + ` (${todays.length})`;
+    (activityLogOpen ? 'Hide' : 'Show') + ` (${manualEntries.length + bonusCount + milestoneCount})`;
 
   const el = document.getElementById('activityLog');
   el.style.display = activityLogOpen ? 'block' : 'none';
   if(!activityLogOpen) return;
 
+  const todays = activityEntriesForDate(date, ledger, manualEntries).sort((a, b) => b.ts - a.ts);
   if(todays.length === 0){
     el.innerHTML = `<div class="empty">Nothing logged ${date === todayKey() ? 'yet today' : `on ${ledgerDateCaption(date)}`}.</div>`;
     return;
@@ -4331,7 +4640,7 @@ function renderActivityLog(){
       <div class="row">
         <div class="row-main">
           <div class="row-name">${escapeHtml(e.name)}</div>
-          <div class="row-sub mono">${e.derived ? `Automatic milestone · ${time}` : time}</div>
+          <div class="row-sub mono">${e.derived ? `${automaticEntryLabel(e)} · ${time}` : time}</div>
         </div>
         <span class="pill ${tone} mono" style="pointer-events:none;">${sign}${points}</span>
         ${e.derived ? '' : `<button type="button" class="edit-btn" data-action="remove-entry" data-id="${escapeHtml(e.id)}" aria-label="Remove ${escapeHtml(e.name)} from ${date}">✕</button>`}
@@ -4579,6 +4888,7 @@ document.addEventListener('keydown', event => {
   }
 });
 document.addEventListener('click', event => {
+  if(clearingDevice || peerClearingDevice) return;
   const target = event.target.closest('[data-action]');
   if(!target) return;
   const action = target.dataset.action;
@@ -4603,6 +4913,10 @@ document.addEventListener('click', event => {
     case 'save-bonus': saveBonus(); break;
     case 'delete-bonus': deleteBonusConfirm(); break;
     case 'log-bonus': logBonus(id); break;
+    case 'open-daily-bonus': openDailyBonusModal(id); break;
+    case 'close-daily-bonus': closeDailyBonusModal(); break;
+    case 'save-daily-bonus': saveDailyBonus(); break;
+    case 'delete-daily-bonus': deleteDailyBonusConfirm(); break;
     case 'toggle-day-complete': toggleDayCompletion(target.dataset.date); break;
     case 'open-milestone': openMilestoneModal(id); break;
     case 'close-milestone': closeMilestoneModal(); break;
@@ -4657,19 +4971,25 @@ document.querySelectorAll('[data-sort-kind]').forEach(select => {
   select.addEventListener('change', event => setTaskSortMode(event.currentTarget.dataset.sortKind, event.currentTarget.value));
 });
 document.getElementById('restoreFileInput').addEventListener('change', async event => {
-  const file = event.target.files && event.target.files[0];
+  const input = event.target;
+  const restoreText = document.getElementById('restoreText');
+  const file = input.files?.[0];
+  restoreText.value = '';
   if(!file) return;
   if(file.size > 10 * 1024 * 1024){
+    input.value = '';
     setBackupStatus('That file is too large to be a Tally backup.', 'error');
     return;
   }
   try{
     const text = await file.text();
+    if(input.files?.[0] !== file) return;
     const clean = validateBackupObject(JSON.parse(text));
-    document.getElementById('restoreText').value = text;
+    restoreText.value = text;
     setBackupStatus(`Ready to restore ${backupContentsLabel(clean)}.`, 'success');
   }catch(e){
-    document.getElementById('restoreText').value = '';
+    if(input.files?.[0] !== file) return;
+    input.value = '';
     setBackupStatus(`Backup not accepted: ${e.message}`, 'error');
   }
 });
@@ -4696,6 +5016,9 @@ document.getElementById('csvRestoreFileInput').addEventListener('change', async 
 });
 ['habitName','habitPoints'].forEach(id => document.getElementById(id).addEventListener('input', () => clearFieldError('habitError')));
 ['bonusName','bonusPoints'].forEach(id => document.getElementById(id).addEventListener('input', () => clearFieldError('bonusError')));
+['dailyBonusName','dailyBonusPoints','dailyBonusDescription'].forEach(id =>
+  document.getElementById(id)?.addEventListener('input', () => clearFieldError('dailyBonusError'))
+);
 document.getElementById('taskSectionName').addEventListener('input', () => clearFieldError('taskSectionError'));
 ['milestoneName','milestoneDays','milestonePoints','milestoneDescription'].forEach(id =>
   document.getElementById(id).addEventListener('input', () => clearFieldError('milestoneError'))
@@ -4733,6 +5056,7 @@ document.addEventListener('keydown', event => {
     if(top.id === 'confirmOverlay') resolveConfirm(false);
     else if(top.id === 'habitOverlay') closeHabitModal();
     else if(top.id === 'bonusOverlay') closeBonusModal();
+    else if(top.id === 'dailyBonusOverlay') closeDailyBonusModal();
     else if(top.id === 'taskSectionOverlay') closeTaskSectionModal();
     else if(top.id === 'milestoneOverlay') closeMilestoneModal();
     else if(top.id === 'settingsOverlay') closeSettings();
@@ -4764,17 +5088,37 @@ loadAll().then(() => { lastKnownDay = todayKey(); });
 // The ledger day is only ever computed at render time (there's no stored "current day").
 // These just make sure a render actually happens when it rolls over, covering the case
 // where the app is left open and awake across the day-start boundary.
-function refreshIfNewDay(){
+function updateLedgerDay(){
   const now = todayKey();
-  if(now !== lastKnownDay){
-    const wasShowingLatest = !isValidDateKey(todayViewDate) || todayViewDate === lastKnownDay;
-    lastKnownDay = now;
-    if(wasShowingLatest) todayViewDate = now;
+  if(now === lastKnownDay) return false;
+  const wasShowingLatest = !isValidDateKey(todayViewDate) || todayViewDate === lastKnownDay;
+  lastKnownDay = now;
+  if(wasShowingLatest) todayViewDate = now;
+  return true;
+}
+function refreshIfNewDay(){
+  if(updateLedgerDay()){
+    recomputeAllHabitStreaks();
     renderAll();
   }
 }
+function scheduleNextDayRefresh(){
+  clearTimeout(dayRefreshTimer);
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(dayStartHour, 0, 0, 0);
+  if(next <= now){
+    next.setDate(next.getDate() + 1);
+    // Reapply the hour after a spring-forward day normalized a missing hour.
+    next.setHours(dayStartHour, 0, 0, 0);
+  }
+  dayRefreshTimer = setTimeout(() => {
+    refreshIfNewDay();
+    scheduleNextDayRefresh();
+  }, Math.max(1, next.getTime() - now.getTime()));
+}
 function refreshCloudIfStale(){
-  if(!appReady || !navigator.onLine || Date.now() - lastCloudRefreshAt < 30000) return;
+  if(!appReady || clearingDevice || peerClearingDevice || !navigator.onLine || Date.now() - lastCloudRefreshAt < 30000) return;
   syncCloudNow();
 }
 document.addEventListener('visibilitychange', () => {
@@ -4792,16 +5136,18 @@ window.addEventListener('pageshow', () => {
   refreshCloudIfStale();
 });
 window.addEventListener('online', async () => {
-  if(!appReady) return;
+  if(!appReady || clearingDevice || peerClearingDevice) return;
   if(!cloudEnabled && !await verifyCloudAccess()) return;
   syncCloudNow();
 });
 window.addEventListener('offline', () => {
   setCloudStatus('offline', 'Changes stay in the on-device database and are queued until reconnection.');
 });
-window.addEventListener('pagehide', () => writeEmergencyMirror(buildSnapshot()));
+window.addEventListener('pagehide', () => {
+  if(appReady && !clearingDevice && !peerClearingDevice) writeEmergencyMirror(buildSnapshot());
+});
 document.addEventListener('visibilitychange', () => {
-  if(document.hidden) writeEmergencyMirror(buildSnapshot());
+  if(appReady && !clearingDevice && !peerClearingDevice && document.hidden) writeEmergencyMirror(buildSnapshot());
 });
 setInterval(refreshIfNewDay, 60000);
 

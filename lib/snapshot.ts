@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const CURRENT_SNAPSHOT_VERSION = 7;
+
 const id = z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/);
 const name = z.string().trim().min(1).max(60);
 const description = z.string().trim().max(160);
@@ -60,6 +62,7 @@ const milestone = z.object({
   points: z.number().int().min(1).max(9_999),
   description
 }).strict();
+const dailyBonus = milestone.omit({ days: true });
 
 const completedDay = z.object({
   id,
@@ -115,6 +118,7 @@ const validateCollections = (sectionMode: "topic" | "legacy") => (
     taskSections?: Array<{ id: string; kind: "habit" | "good" | "bad" | "bonus" }>;
     habits: Array<{ id: string; type?: "good" | "bad"; sectionId?: string | null }>;
     bonusTasks: Array<{ id: string; sectionId?: string | null }>;
+    dailyBonuses?: Array<{ id: string }>;
     milestones: Array<{ id: string }>;
     completedDays: Array<{ id: string; date: string }>;
     entries: Array<{ id: string }>;
@@ -124,6 +128,7 @@ const validateCollections = (sectionMode: "topic" | "legacy") => (
   uniqueBy(value.taskSections || [], (item) => item.id, context, "Task sections");
   uniqueBy(value.habits, (item) => item.id, context, "Habits");
   uniqueBy(value.bonusTasks, (item) => item.id, context, "Bonus entries");
+  uniqueBy(value.dailyBonuses || [], (item) => item.id, context, "Automatic daily bonuses");
   uniqueBy(value.milestones, (item) => item.id, context, "Milestones");
   uniqueBy(value.completedDays, (item) => item.id, context, "Completed days");
   uniqueBy(value.completedDays, (item) => item.date, context, "Completed-day dates");
@@ -142,6 +147,10 @@ const validateCollections = (sectionMode: "topic" | "legacy") => (
   });
 };
 const data = z.object(dataShape).strict().superRefine(validateCollections("topic"));
+const dataV7 = z.object({
+  ...dataShape,
+  dailyBonuses: z.array(dailyBonus).max(1_000)
+}).strict().superRefine(validateCollections("topic"));
 
 const settingsBase = z.object({
   dailyBase: z.number().int().min(0).max(9_999),
@@ -190,9 +199,12 @@ const snapshotV6Schema = z.object({
   data,
   settings
 }).strict();
+const snapshotV7Schema = snapshotV6Schema.extend({
+  schemaVersion: z.literal(CURRENT_SNAPSHOT_VERSION),
+  data: dataV7
+}).strict();
 
-// Rolling deployment compatibility: accept both earlier encrypted cloud
-// snapshots so a new client can load them and write schema 6 without downtime.
+// Accept deployed snapshots so a new client can load them and write schema 7.
 const legacyDataV5 = z.object({
   taskSections: z.array(taskSectionV5).max(1_000),
   habits: z.array(habit).max(1_000),
@@ -248,7 +260,7 @@ const snapshotV3Schema = z.object({
   settings: legacySettingsV3
 }).strict();
 
-export const snapshotSchema = z.union([snapshotV6Schema, snapshotV5Schema, snapshotV4Schema, snapshotV3Schema]);
+export const snapshotSchema = z.union([snapshotV7Schema, snapshotV6Schema, snapshotV5Schema, snapshotV4Schema, snapshotV3Schema]);
 
 export const syncPutSchema = z.object({
   baseRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),

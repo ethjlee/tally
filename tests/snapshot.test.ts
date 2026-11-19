@@ -5,7 +5,7 @@ import { parseSnapshot, syncPutSchema } from "../lib/snapshot";
 function validSnapshot() {
   return {
     app: "Tally" as const,
-    schemaVersion: 6 as const,
+    schemaVersion: 7 as const,
     savedAt: "2026-07-29T12:00:00.000Z",
     revision: 4,
     writerId: "device_1",
@@ -31,6 +31,9 @@ function validSnapshot() {
         }
       ],
       bonusTasks: [],
+      dailyBonuses: [
+        { id: "daily_bonus_1", name: "No debits", points: 80, description: "No debit entries" }
+      ],
       milestones: [
         {
           id: "milestone_1",
@@ -73,18 +76,24 @@ function validSnapshot() {
 
 test("server accepts the complete current ledger schema", () => {
   const parsed = parseSnapshot(validSnapshot());
-  assert.equal(parsed.schemaVersion, 6);
-  if (parsed.schemaVersion !== 6) throw new Error("Expected current schema");
+  assert.equal(parsed.schemaVersion, 7);
+  if (parsed.schemaVersion !== 7) throw new Error("Expected current schema");
   assert.equal(parsed.settings.backupReminderDays, 14);
   assert.equal(parsed.settings.taskSortModes.habit, "usage-desc");
   assert.equal(parsed.data.habits[0].order, 0);
   assert.equal(parsed.data.habits[0].sectionId, "section_1");
   assert.equal(parsed.data.taskSections[0].kind, "habit");
   assert.equal(parsed.data.milestones.length, 1);
+  assert.equal(parsed.data.dailyBonuses[0].points, 80);
 });
 
-test("server accepts deployed version-5, version-4, and version-3 snapshots during rolling upgrade", () => {
-  const legacyV5: any = structuredClone(validSnapshot());
+test("server accepts deployed version-6, version-5, version-4, and version-3 snapshots during rolling upgrade", () => {
+  const legacyV6: any = structuredClone(validSnapshot());
+  legacyV6.schemaVersion = 6;
+  delete legacyV6.data.dailyBonuses;
+  assert.equal(parseSnapshot(legacyV6).schemaVersion, 6);
+
+  const legacyV5: any = structuredClone(legacyV6);
   legacyV5.schemaVersion = 5;
   legacyV5.data.taskSections[0].kind = "good";
   legacyV5.settings.taskSortModes = {
@@ -118,6 +127,10 @@ test("server accepts deployed version-5, version-4, and version-3 snapshots duri
 });
 
 test("server rejects duplicate IDs and duplicate completed dates", () => {
+  const duplicateBonus = validSnapshot();
+  duplicateBonus.data.dailyBonuses.push({ ...duplicateBonus.data.dailyBonuses[0] });
+  assert.throws(() => parseSnapshot(duplicateBonus));
+
   const duplicateEntry = validSnapshot();
   duplicateEntry.data.entries.push({ ...duplicateEntry.data.entries[0] });
   assert.throws(() => parseSnapshot(duplicateEntry));
@@ -129,6 +142,21 @@ test("server rejects duplicate IDs and duplicate completed dates", () => {
     ts: 1_753_795_200_001
   });
   assert.throws(() => parseSnapshot(duplicateDay));
+});
+
+test("server validates automatic daily bonus rules", () => {
+  for (const invalid of [0, -80, 1.5, 10_000]) {
+    const snapshot = validSnapshot();
+    snapshot.data.dailyBonuses[0].points = invalid;
+    assert.throws(() => parseSnapshot(snapshot));
+  }
+  const invalidDescription = validSnapshot();
+  invalidDescription.data.dailyBonuses[0].description = "a".repeat(161);
+  assert.throws(() => parseSnapshot(invalidDescription));
+
+  const missingRules: any = validSnapshot();
+  delete missingRules.data.dailyBonuses;
+  assert.throws(() => parseSnapshot(missingRules));
 });
 
 test("server rejects wrong point signs and unknown fields", () => {

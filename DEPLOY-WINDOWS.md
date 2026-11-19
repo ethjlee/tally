@@ -6,7 +6,7 @@ This guide uses PowerShell and Vercel CLI. GitHub is optional.
 
 Install:
 
-- Node.js LTS, version 20.9 or newer.
+- Node.js LTS, version 22 or newer.
 - A password manager for the three secrets.
 - Optional: Git for version history.
 
@@ -170,6 +170,13 @@ After deployment, test these deliberately:
 Keep at least two recent external backups and the encryption key outside Vercel.
 
 ## Updating the production app
+
+Before updating, sync each device with pending changes, save a complete JSON
+backup outside the browser, and close the older Tally tabs or installed app
+windows. The updated app can read older snapshots and keeps the existing
+database and encryption key. Reopen Tally after deployment and confirm that Data
+reports the cloud is up to date. If Tally reports a merge conflict, review the
+ledger before issuing another destructive change.
 
 ```powershell
 npm install

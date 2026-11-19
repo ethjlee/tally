@@ -4,7 +4,7 @@
   "private": true,
   "description": "Private, single-owner Tally PWA with encrypted cloud sync.",
   "engines": {
-    "node": ">=20.9.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "dev": "next dev",
@@ -20,12 +20,12 @@
     "generate:secrets": "node scripts/generate-secrets.mjs"
   },
   "dependencies": {
-    "better-auth": "1.6.25",
-    "next": "16.2.12",
+    "better-auth": "1.7.26",
+    "next": "16.4.6",
     "pg": "8.22.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "24.10.1",
@@ -39,7 +39,7 @@
     "typescript": "5.9.3"
   },
   "overrides": {
-    "postcss": "8.5.24",
-    "sharp": "0.35.3"
+    "postcss": "8.5.33",
+    "sharp": "0.35.5"
   }
 }

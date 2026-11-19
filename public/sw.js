@@ -1,22 +1,25 @@
 "use strict";
 
-const CACHE_NAME = "tally-shell-v5";
+const CACHE_NAME = "tally-shell-v8";
+const PAGE_PATH = "/tally.html";
+const CACHED_PAGE_PATH = "/tally-v8.html";
 const SHELL_ASSETS = [
-  "/tally.html",
+  CACHED_PAGE_PATH,
   "/tally.css",
-  "/tally.js",
+  "/tally-v8.js",
   "/manifest.webmanifest",
   "/icons/tally.svg",
   "/icons/tally-192.png",
   "/icons/tally-512.png"
 ];
 
+function cacheShell(cache) {
+  return cache.addAll(SHELL_ASSETS.map(path => new Request(path, { cache: "reload" })));
+}
+
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(SHELL_ASSETS))
-      .then(() => self.skipWaiting())
-  );
+  // Let pages using the previous shell close before replacing their cache.
+  event.waitUntil(caches.open(CACHE_NAME).then(cacheShell));
 });
 
 self.addEventListener("activate", (event) => {
@@ -41,23 +44,29 @@ function mustNeverCache(url) {
   );
 }
 
+async function cachedShellAsset(path) {
+  const cache = await caches.open(CACHE_NAME);
+  const cachePath = path === PAGE_PATH ? CACHED_PAGE_PATH : path;
+  const cached = await cache.match(cachePath);
+  if (cached || path !== PAGE_PATH) return cached;
+
+  // Signing out can clear the shell while this worker stays active. Fill the
+  // whole cache again on the next app launch so the assets stay matched.
+  await cacheShell(cache);
+  return cache.match(cachePath);
+}
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin || mustNeverCache(url)) return;
 
-  if (SHELL_ASSETS.includes(url.pathname)) {
+  if (url.pathname === PAGE_PATH || SHELL_ASSETS.includes(url.pathname)) {
     event.respondWith(
-      fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(request, copy)));
-          }
-          return response;
-        })
-        .catch(() => caches.match(request).then((cached) => cached || caches.match(url.pathname)))
+      cachedShellAsset(url.pathname)
+        .catch(() => undefined)
+        .then(cached => cached || fetch(request))
     );
   }
 });

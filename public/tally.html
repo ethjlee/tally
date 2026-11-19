@@ -122,10 +122,19 @@
 
       <section class="section">
         <div class="section-head">
+          <span class="section-title">Automatic daily bonuses</span>
+          <button type="button" class="add-link bonus-tone" data-action="open-daily-bonus">+ Add daily bonus</button>
+        </div>
+        <div class="section-help">Earned once for every finished day with no debits, including days with no logged activity. Checked at your next day-start time, or when you reopen Tally. Adding a past debit removes that day’s bonus. Changes recalculate past awards.</div>
+        <div id="dailyBonusList"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
           <span class="section-title">Success milestones</span>
           <button type="button" class="add-link bonus-tone" data-action="open-milestone">+ Add milestone</button>
         </div>
-        <div class="section-help">Awarded automatically when you reach the target number of successful tracked days in a row. Untracked days pause the streak; a tracked day below your success threshold resets it. Changes recalculate past awards immediately.</div>
+        <div class="section-help">Awarded automatically at the next day-start time after reaching your target of successful tracked days in a row. Missed checks catch up when you reopen Tally. Untracked days pause the streak; a tracked day below your success threshold resets it. Changes recalculate past awards immediately.</div>
         <div id="milestoneList"></div>
       </section>
       <div class="sr-only" id="reorderStatus" aria-live="polite"></div>
@@ -221,7 +230,7 @@
         <div class="manage-card">
           <div class="storage-detail" id="resetPreviewEl" aria-live="polite"></div>
           <button type="button" class="manage-row danger" data-action="clear-ledger">
-            <span class="manage-copy"><span class="manage-title">Clear ledger &amp; milestones</span><span class="manage-sub">Removes habit topics, bonus sections, habits, bonus entries, milestones, completed-day marks, and logged activity. Settings stay unchanged.</span></span>
+            <span class="manage-copy"><span class="manage-title">Clear ledger &amp; automatic rewards</span><span class="manage-sub">Removes habit topics, bonus sections, habits, bonus entries, automatic daily bonuses, milestones, completed-day marks, and logged activity. Settings stay unchanged.</span></span>
           </button>
           <button type="button" class="manage-row danger" data-action="reset-settings">
             <span class="manage-copy"><span class="manage-title">Reset settings</span><span class="manage-sub">Returns scoring, start date, day boundary, and chart range to defaults.</span></span>
@@ -368,6 +377,33 @@
   </div>
 </div>
 
+<!-- Automatic daily bonus modal -->
+<div class="overlay" id="dailyBonusOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dailyBonusModalTitle">
+    <h2 id="dailyBonusModalTitle">Add automatic daily bonus</h2>
+    <div class="field">
+      <label for="dailyBonusName">Name</label>
+      <input id="dailyBonusName" type="text" placeholder="e.g. No debits" maxlength="60">
+    </div>
+    <div class="field">
+      <label for="dailyBonusPoints">Reward points</label>
+      <input id="dailyBonusPoints" type="number" inputmode="numeric" min="1" max="9999" placeholder="80">
+      <div class="hint">Award once for every day with no debit entries, including empty days, when the next ledger day starts. Uses “Day starts at” in Settings. Missed days are checked when you reopen Tally. Adding a debit later removes that day’s bonus.</div>
+    </div>
+    <div class="field">
+      <label for="dailyBonusDescription">Description <span class="sr-only">(optional)</span></label>
+      <textarea id="dailyBonusDescription" maxlength="160" placeholder="e.g. A day without any debits."></textarea>
+      <div class="hint">Optional · 160 characters maximum. Rules apply from your statistics start date. Editing or deleting a rule, or changing past activity, recalculates its awards.</div>
+      <div class="field-error" id="dailyBonusError" role="alert"></div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn danger" id="deleteDailyBonusBtn" style="display:none" data-action="delete-daily-bonus">Delete</button>
+      <button type="button" class="btn ghost" data-action="close-daily-bonus">Cancel</button>
+      <button type="button" class="btn primary" data-action="save-daily-bonus">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- Milestone modal -->
 <div class="overlay" id="milestoneOverlay">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="milestoneModalTitle">
@@ -379,7 +415,7 @@
     <div class="field">
       <label for="milestoneDays">Consecutive successful days</label>
       <input id="milestoneDays" type="number" inputmode="numeric" min="1" max="100000" placeholder="7">
-      <div class="hint">Award once when a streak reaches exactly this many successful tracked days. Untracked days pause the streak; a tracked day below your threshold resets it. The milestone can be earned again after a reset.</div>
+      <div class="hint">Award once at the next day-start time after a streak reaches exactly this many successful tracked days. Untracked days pause the streak; a tracked day below your threshold resets it. Automatic rewards do not count toward success qualification. The milestone can be earned again after a reset.</div>
     </div>
     <div class="field">
       <label for="milestonePoints">Reward points</label>
@@ -424,7 +460,7 @@
     </div>
     <div class="field backup-format">
       <span class="backup-format-title">Complete CSV backup</span>
-      <div class="hint">A restorable CSV containing settings, habit topics, bonus sections, habits, bonus definitions, milestones, completed-day marks, and every logged entry. Automatic awards are regenerated from those source records. The separate activity CSV remains optimized for spreadsheets.</div>
+      <div class="hint">A restorable CSV containing settings, habit topics, bonus sections, habits, bonus definitions, automatic daily bonuses, milestones, completed-day marks, and every logged entry. Automatic awards are regenerated from those source records. The separate activity CSV remains optimized for spreadsheets.</div>
       <div class="backup-tools">
         <button type="button" class="btn ghost" data-action="download-csv-backup">Save CSV</button>
         <label class="file-picker">Choose CSV<input id="csvRestoreFileInput" type="file" accept=".csv,text/csv"></label>
@@ -509,6 +545,6 @@
   </div>
 </div>
 
-<script src="/tally.js" defer></script>
+<script src="/tally-v8.js" defer></script>
 </body>
 </html>

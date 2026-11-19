@@ -1,4 +1,4 @@
-import { auth } from "../lib/auth";
+import { requireSession, withSessionCookies } from "../lib/session";
 import { ownerExists } from "../lib/db";
 
 export const runtime = "nodejs";
@@ -11,8 +11,8 @@ function redirect(request: Request, destination: string): Response {
 export async function GET(request: Request) {
   try {
     if (!(await ownerExists())) return redirect(request, "/setup");
-    const session = await auth.api.getSession({ headers: request.headers });
-    return redirect(request, session?.user ? "/tally.html" : "/login");
+    const { session, sessionHeaders } = await requireSession(request);
+    return withSessionCookies(redirect(request, session ? "/tally.html" : "/login"), sessionHeaders);
   } catch {
     return new Response(
       "Tally is not initialized yet. Run the database migration, then reload.",

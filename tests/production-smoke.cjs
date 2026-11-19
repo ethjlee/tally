@@ -44,13 +44,27 @@ function waitForReady(timeoutMs = 15_000) {
     assert.match(csp, /frame-ancestors 'none'/);
     assert.match(shell.headers.get("x-robots-tag") || "", /noindex/);
     assert.match(shell.headers.get("cache-control") || "", /no-cache/);
-    assert.match(await shell.text(), /Checking private ledger/);
+    const markup = await shell.text();
+    assert.match(markup, /Checking private ledger/);
+    const clientPath = markup.match(/<script src="(\/tally-v\d+\.js)" defer>/)?.[1];
+    assert.ok(clientPath, "The Tally shell references a versioned client asset");
+    const client = await fetch(`http://127.0.0.1:${port}${clientPath}`);
+    assert.equal(client.status, 200);
+    assert.match(client.headers.get("content-type") || "", /javascript/);
+    assert.match(await client.text(), /function loadAll\(\)/);
+    const precachePath = clientPath.replace(/\.js$/, ".html");
+    const precachePage = await fetch(`http://127.0.0.1:${port}${precachePath}`);
+    assert.equal(precachePage.status, 200);
+    assert.equal(await precachePage.text(), markup);
 
     const worker = await fetch(`http://127.0.0.1:${port}/sw.js`);
     assert.equal(worker.status, 200);
     assert.equal(worker.headers.get("service-worker-allowed"), "/");
     assert.match(worker.headers.get("cache-control") || "", /no-store/);
-    assert.match(await worker.text(), /mustNeverCache/);
+    const workerCode = await worker.text();
+    assert.match(workerCode, /mustNeverCache/);
+    assert.ok(workerCode.includes(JSON.stringify(clientPath)), "The worker precaches the same versioned client asset");
+    assert.ok(workerCode.includes(JSON.stringify(precachePath)), "The worker precaches the matching versioned HTML");
 
     console.log("Production header and static-shell smoke test passed.");
   } finally {

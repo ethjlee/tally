@@ -1,4 +1,4 @@
-import { auth } from "../../lib/auth";
+import { requireSession, withSessionCookies } from "../../lib/session";
 import { ownerExists } from "../../lib/db";
 import { pageResponse, securePage } from "../../lib/pages";
 
@@ -6,19 +6,21 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
+  let sessionHeaders = new Headers();
   try {
     if (!(await ownerExists())) {
       return Response.redirect(new URL("/setup", request.url), 303);
     }
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (session?.user) {
-      return Response.redirect(new URL("/", request.url), 303);
+    const result = await requireSession(request);
+    sessionHeaders = result.sessionHeaders;
+    if (result.session) {
+      return withSessionCookies(Response.redirect(new URL("/", request.url), 303), sessionHeaders);
     }
   } catch {
     // The form will present a generic service error if setup is incomplete.
   }
 
-  return pageResponse(
+  return withSessionCookies(pageResponse(
     securePage({
       title: "Sign in · Tally",
       heading: "Private sign in",
@@ -37,5 +39,5 @@ export async function GET(request: Request) {
       </form>
       <p class="privacy-note">No public registration. No analytics. Ledger requests are never cached.</p>`
     })
-  );
+  ), sessionHeaders);
 }

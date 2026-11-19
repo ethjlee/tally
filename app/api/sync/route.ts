@@ -14,16 +14,16 @@ export const dynamic = "force-dynamic";
 const MAX_SYNC_BYTES = 5 * 1024 * 1024;
 
 export async function GET(request: Request) {
-  const session = await requireSession(request);
+  const { session, sessionHeaders } = await requireSession(request);
   if (!session) {
-    return privateJson({ error: "UNAUTHORIZED" }, { status: 401 });
+    return privateJson({ error: "UNAUTHORIZED" }, { status: 401, headers: sessionHeaders });
   }
   try {
     const state = await getCloudState(session.user.id);
     if (state.snapshot) parseSnapshot(state.snapshot);
-    return privateJson(state);
+    return privateJson(state, { headers: sessionHeaders });
   } catch {
-    return privateJson({ error: "CLOUD_STATE_UNREADABLE" }, { status: 500 });
+    return privateJson({ error: "CLOUD_STATE_UNREADABLE" }, { status: 500, headers: sessionHeaders });
   }
 }
 
@@ -31,9 +31,10 @@ export async function PUT(request: Request) {
   if (!sameOrigin(request)) {
     return privateJson({ error: "REQUEST_REJECTED" }, { status: 403 });
   }
-  const session = await requireSession(request);
+  const { session, sessionHeaders } = await requireSession(request);
+  const json = (body: unknown, status = 200) => privateJson(body, { status, headers: sessionHeaders });
   if (!session) {
-    return privateJson({ error: "UNAUTHORIZED" }, { status: 401 });
+    return json({ error: "UNAUTHORIZED" }, 401);
   }
 
   try {
@@ -48,22 +49,22 @@ export async function PUT(request: Request) {
     );
 
     if (result.status === "conflict") {
-      return privateJson(
+      return json(
         { error: "REVISION_CONFLICT", ...result.current },
-        { status: 409 }
+        409
       );
     }
-    return privateJson(result);
+    return json(result);
   } catch (error) {
     if (error instanceof ZodError) {
-      return privateJson({ error: "INVALID_SNAPSHOT" }, { status: 400 });
+      return json({ error: "INVALID_SNAPSHOT" }, 400);
     }
     if (error instanceof Error && error.message === "PAYLOAD_TOO_LARGE") {
-      return privateJson({ error: "PAYLOAD_TOO_LARGE" }, { status: 413 });
+      return json({ error: "PAYLOAD_TOO_LARGE" }, 413);
     }
     if (error instanceof Error && error.message === "INVALID_JSON") {
-      return privateJson({ error: "INVALID_JSON" }, { status: 400 });
+      return json({ error: "INVALID_JSON" }, 400);
     }
-    return privateJson({ error: "SYNC_FAILED" }, { status: 500 });
+    return json({ error: "SYNC_FAILED" }, 500);
   }
 }

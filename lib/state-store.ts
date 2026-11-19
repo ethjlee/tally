@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { pool } from "./db";
 import { decryptState, encryptState, type EncryptedState } from "./crypto";
-import type { TallySnapshot } from "./snapshot";
+import { CURRENT_SNAPSHOT_VERSION, type TallySnapshot } from "./snapshot";
 
 type StateRow = {
   revision: string | number;
@@ -129,6 +129,13 @@ export async function putCloudState(
     if (currentRevision !== baseRevision) {
       await client.query("ROLLBACK");
       return { status: "conflict", current: stateFromRow(userId, current) };
+    }
+    if (snapshot.schemaVersion < CURRENT_SNAPSHOT_VERSION) {
+      const cloud = stateFromRow(userId, current);
+      if (cloud.snapshot && snapshot.schemaVersion < cloud.snapshot.schemaVersion) {
+        await client.query("ROLLBACK");
+        return { status: "conflict", current: cloud };
+      }
     }
 
     await client.query(

@@ -100,6 +100,20 @@ Automatic alphabetical, usage, and point-value sorting remains available within
 each group. Topics, bonus sections, assignments, manual order, and sort
 preferences sync across devices and are included in complete JSON/CSV backups.
 
+Use **Today → Automatic daily bonuses → Add daily bonus** to set a no-debits
+reward, such as +80. Each rule applies once to every finished ledger day from
+your statistics start date with no debit entries, including days with no logged
+activity. These awards make otherwise empty days visible in history and statistics.
+Adding a backdated debit removes that day's reward immediately; removing its last
+debit restores it. Manual bonus entries remain available for one-off rewards.
+
+Daily bonuses and success milestones finalize at the next **Day starts at** time
+from Settings, in the device's local time. If Tally is closed, it checks all missed
+days when reopened. Rewards belong to the day that earned them; their timestamps
+show the following day-start time. Rule and history edits recalculate awards, and
+automatic reward points do not count toward success qualification. Rules sync
+across devices and are included in complete JSON/CSV backups.
+
 ## Updating
 
 Run the full check before deployment:

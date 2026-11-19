@@ -33,6 +33,14 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
+  async rewrites() {
+    return [
+      { source: "/tally-v7.html", destination: "/tally.html" },
+      { source: "/tally-v7.js", destination: "/tally.js" },
+      { source: "/tally-v8.html", destination: "/tally.html" },
+      { source: "/tally-v8.js", destination: "/tally.js" }
+    ];
+  },
   async headers() {
     return [
       {

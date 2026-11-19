@@ -1,16 +1,16 @@
-import { auth } from "../../lib/auth";
+import { requireSession, withSessionCookies } from "../../lib/session";
 import { pageResponse, securePage } from "../../lib/pages";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const session = await auth.api.getSession({ headers: request.headers });
-  if (!session?.user) {
-    return Response.redirect(new URL("/login", request.url), 303);
+  const { session, sessionHeaders } = await requireSession(request);
+  if (!session) {
+    return withSessionCookies(Response.redirect(new URL("/login", request.url), 303), sessionHeaders);
   }
 
-  return pageResponse(
+  return withSessionCookies(pageResponse(
     securePage({
       title: "Account security · Tally",
       heading: "Account security",
@@ -36,5 +36,5 @@ export async function GET(request: Request) {
       </div>
       <p class="privacy-note">Changing the password revokes your other sessions. Your separate data-encryption key remains unchanged.</p>`
     })
-  );
+  ), sessionHeaders);
 }
