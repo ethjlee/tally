@@ -1,12 +1,12 @@
 "use strict";
 
-const CACHE_NAME = "tally-shell-v8";
+const CACHE_NAME = "tally-shell-v12";
 const PAGE_PATH = "/tally.html";
-const CACHED_PAGE_PATH = "/tally-v8.html";
+const CACHED_PAGE_PATH = "/tally-v12.html";
 const SHELL_ASSETS = [
   CACHED_PAGE_PATH,
   "/tally.css",
-  "/tally-v8.js",
+  "/tally-v12.js",
   "/manifest.webmanifest",
   "/icons/tally.svg",
   "/icons/tally-192.png",

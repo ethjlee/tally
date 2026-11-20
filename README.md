@@ -114,6 +114,13 @@ show the following day-start time. Rule and history edits recalculate awards, an
 automatic reward points do not count toward success qualification. Rules sync
 across devices and are included in complete JSON/CSV backups.
 
+Open **Travel mode** in Today or History to pause an inclusive range of ledger
+days. You can backdate a trip, schedule it ahead, or leave the end date blank.
+**Resume today** counts the current ledger day again. During a pause, Tally keeps
+your entries and skips those dates for points, streaks, statistics, and rewards.
+Editing or removing a pause recalculates history. Trips sync across devices and
+are included in complete JSON and CSV backups.
+
 ## Updating
 
 Run the full check before deployment:

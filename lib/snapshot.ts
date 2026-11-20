@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const CURRENT_SNAPSHOT_VERSION = 7;
+export const CURRENT_SNAPSHOT_VERSION = 8;
 
 const id = z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/);
 const name = z.string().trim().min(1).max(60);
@@ -64,6 +64,9 @@ const milestone = z.object({
 }).strict();
 const dailyBonus = milestone.omit({ days: true });
 
+const travelPause = z.object({ id, start: dateKey, end: dateKey.nullable() }).strict()
+  .refine(pause => pause.end === null || pause.end >= pause.start, "Travel pause ends before it starts");
+
 const completedDay = z.object({
   id,
   date: dateKey,
@@ -118,6 +121,7 @@ const validateCollections = (sectionMode: "topic" | "legacy") => (
     taskSections?: Array<{ id: string; kind: "habit" | "good" | "bad" | "bonus" }>;
     habits: Array<{ id: string; type?: "good" | "bad"; sectionId?: string | null }>;
     bonusTasks: Array<{ id: string; sectionId?: string | null }>;
+    travelPauses?: Array<{ id: string }>;
     dailyBonuses?: Array<{ id: string }>;
     milestones: Array<{ id: string }>;
     completedDays: Array<{ id: string; date: string }>;
@@ -128,6 +132,7 @@ const validateCollections = (sectionMode: "topic" | "legacy") => (
   uniqueBy(value.taskSections || [], (item) => item.id, context, "Task sections");
   uniqueBy(value.habits, (item) => item.id, context, "Habits");
   uniqueBy(value.bonusTasks, (item) => item.id, context, "Bonus entries");
+  uniqueBy(value.travelPauses || [], (item) => item.id, context, "Travel pauses");
   uniqueBy(value.dailyBonuses || [], (item) => item.id, context, "Automatic daily bonuses");
   uniqueBy(value.milestones, (item) => item.id, context, "Milestones");
   uniqueBy(value.completedDays, (item) => item.id, context, "Completed days");
@@ -200,11 +205,11 @@ const snapshotV6Schema = z.object({
   settings
 }).strict();
 const snapshotV7Schema = snapshotV6Schema.extend({
-  schemaVersion: z.literal(CURRENT_SNAPSHOT_VERSION),
+  schemaVersion: z.literal(7),
   data: dataV7
 }).strict();
 
-// Accept deployed snapshots so a new client can load them and write schema 7.
+// Accept deployed snapshots so a new client can load them and write the current schema.
 const legacyDataV5 = z.object({
   taskSections: z.array(taskSectionV5).max(1_000),
   habits: z.array(habit).max(1_000),
@@ -260,7 +265,13 @@ const snapshotV3Schema = z.object({
   settings: legacySettingsV3
 }).strict();
 
-export const snapshotSchema = z.union([snapshotV7Schema, snapshotV6Schema, snapshotV5Schema, snapshotV4Schema, snapshotV3Schema]);
+const snapshotV8Schema = snapshotV7Schema.extend({
+  schemaVersion: z.literal(CURRENT_SNAPSHOT_VERSION),
+  data: z.object({ ...dataV7.shape, travelPauses: z.array(travelPause).max(1_000) })
+    .strict().superRefine(validateCollections("topic"))
+});
+
+export const snapshotSchema = z.union([snapshotV8Schema, snapshotV7Schema, snapshotV6Schema, snapshotV5Schema, snapshotV4Schema, snapshotV3Schema]);
 
 export const syncPutSchema = z.object({
   baseRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),

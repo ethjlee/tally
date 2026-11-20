@@ -5,11 +5,12 @@ import { parseSnapshot, syncPutSchema } from "../lib/snapshot";
 function validSnapshot() {
   return {
     app: "Tally" as const,
-    schemaVersion: 7 as const,
+    schemaVersion: 8 as const,
     savedAt: "2026-07-29T12:00:00.000Z",
     revision: 4,
     writerId: "device_1",
     data: {
+      travelPauses: [{ id: "trip_1", start: "2026-07-29", end: "2026-08-01" }],
       taskSections: [
         {
           id: "section_1",
@@ -76,8 +77,8 @@ function validSnapshot() {
 
 test("server accepts the complete current ledger schema", () => {
   const parsed = parseSnapshot(validSnapshot());
-  assert.equal(parsed.schemaVersion, 7);
-  if (parsed.schemaVersion !== 7) throw new Error("Expected current schema");
+  assert.equal(parsed.schemaVersion, 8);
+  if (parsed.schemaVersion !== 8) throw new Error("Expected current schema");
   assert.equal(parsed.settings.backupReminderDays, 14);
   assert.equal(parsed.settings.taskSortModes.habit, "usage-desc");
   assert.equal(parsed.data.habits[0].order, 0);
@@ -87,8 +88,13 @@ test("server accepts the complete current ledger schema", () => {
   assert.equal(parsed.data.dailyBonuses[0].points, 80);
 });
 
-test("server accepts deployed version-6, version-5, version-4, and version-3 snapshots during rolling upgrade", () => {
-  const legacyV6: any = structuredClone(validSnapshot());
+test("server accepts deployed version-7 through version-3 snapshots during rolling upgrade", () => {
+  const legacyV7: any = structuredClone(validSnapshot());
+  legacyV7.schemaVersion = 7;
+  delete legacyV7.data.travelPauses;
+  assert.equal(parseSnapshot(legacyV7).schemaVersion, 7);
+
+  const legacyV6 = structuredClone(legacyV7);
   legacyV6.schemaVersion = 6;
   delete legacyV6.data.dailyBonuses;
   assert.equal(parseSnapshot(legacyV6).schemaVersion, 6);
@@ -142,6 +148,17 @@ test("server rejects duplicate IDs and duplicate completed dates", () => {
     ts: 1_753_795_200_001
   });
   assert.throws(() => parseSnapshot(duplicateDay));
+});
+
+test("server validates pause dates and unique IDs", () => {
+  const snapshot = validSnapshot();
+  const pause = snapshot.data.travelPauses[0];
+  for (const end of ["2026-07-28", "2026-02-30"]) {
+    assert.throws(() => parseSnapshot({ ...snapshot, data: { ...snapshot.data, travelPauses: [{ ...pause, end }] } }));
+  }
+  assert.doesNotThrow(() => parseSnapshot({ ...snapshot, data: { ...snapshot.data, travelPauses: [{ ...pause, end: null }] } }));
+  snapshot.data.travelPauses.push({ ...pause });
+  assert.throws(() => parseSnapshot(snapshot));
 });
 
 test("server validates automatic daily bonus rules", () => {

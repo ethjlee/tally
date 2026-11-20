@@ -87,6 +87,7 @@
       <section class="section">
         <div class="section-head">
           <span class="section-title" id="activitySectionTitle">Today's activity</span>
+          <button type="button" class="add-link" data-action="open-travel">Travel mode</button>
           <button type="button" class="add-link" data-action="toggle-activity" id="activityToggleBtn">Show (0)</button>
         </div>
         <div id="todayCompletionControl"></div>
@@ -147,6 +148,7 @@
           <span class="history-rate mono" id="historyRateEl"></span>
         </summary>
         <div class="insight-body">
+          <button type="button" class="add-link" data-action="open-travel">Travel mode</button>
           <div id="historyAverages"></div>
           <div class="range-select" id="rangeSelect"></div>
           <div class="date-jump">
@@ -377,6 +379,29 @@
   </div>
 </div>
 
+<div class="overlay" id="travelOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="travelTitle">
+    <h2 id="travelTitle">Travel mode</h2>
+    <div class="hint">Pause whole ledger days. Entries stay in your history while points, streaks, and rewards skip these dates.</div>
+    <div id="travelList"></div>
+    <div class="field">
+      <label for="travelStart">First paused day</label>
+      <input type="date" id="travelStart" required>
+    </div>
+    <div class="field">
+      <label for="travelEnd">Last paused day</label>
+      <input type="date" id="travelEnd" aria-describedby="travelHint">
+      <div class="hint" id="travelHint">Leave blank to pause until you resume. Dates follow your “Day starts at” setting.</div>
+      <div class="field-error" id="travelError" role="alert"></div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn danger" data-action="remove-travel" id="removeTravel" hidden>Remove pause</button>
+      <button type="button" class="btn ghost" data-action="close-travel">Cancel</button>
+      <button type="button" class="btn primary" data-action="save-travel" id="saveTravel">Add pause</button>
+    </div>
+  </div>
+</div>
+
 <!-- Automatic daily bonus modal -->
 <div class="overlay" id="dailyBonusOverlay">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dailyBonusModalTitle">
@@ -545,6 +570,6 @@
   </div>
 </div>
 
-<script src="/tally-v8.js" defer></script>
+<script src="/tally-v12.js" defer></script>
 </body>
 </html>

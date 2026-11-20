@@ -133,6 +133,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
       trackingStartDate = payload.start;
       dailyBase = payload.base;
       successThreshold = payload.threshold;
+      setTravelPauses([]);
       entries = payload.entries;
       completedDays = payload.completedDays;
       milestones = payload.milestones;
@@ -767,6 +768,13 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
     eq(window.eval('todayViewDate'), '2026-03-08', 'Automatic rollover advances the Today view');
     eq(window.deriveDailyBonusEntries()[0].ts, clockNow, 'Daily reward timestamp is next-day start rather than noon');
     eq(window.deriveMilestoneEntries()[0].ts, clockNow, 'Milestone timestamp is next-day start rather than noon');
+    window.setTravelPauses([{ id:'boundary_trip', start:'2026-03-08', end:'2026-03-08' }]);
+    clockNow = new realWindowDate(2026, 2, 9, 6, 59).getTime();
+    ok(window.pauseOn(window.todayKey()), 'The last travel day stays paused up to the configured rollover');
+    clockNow = new realWindowDate(2026, 2, 9, 7).getTime();
+    eq(window.pauseOn(window.todayKey()), null, 'Travel ends precisely when the next ledger day starts');
+    eq(window.deriveDailyBonusEntries().length, 1, 'Crossing the day boundary skips the finished vacation reward');
+    window.setTravelPauses([]);
     clockNow = new realWindowDate(2026, 2, 11, 7).getTime();
     window.dispatchEvent(new window.Event('pageshow'));
     eq(window.deriveDailyBonusEntries().length, 4, 'Returning after several days catches up every finished day across daylight-saving time');
@@ -859,6 +867,182 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
   const gapPathData = window.document.querySelector('.chart-score-gap').getAttribute('d');
   ok(/^M.+ L/.test(gapPathData), 'History renders a dashed connector across unknown days', gapPathData);
   ok(window.document.querySelector('.legend-swatch.gap'), 'History explains dashed unknown gaps in its legend');
+
+  const chart = window.document.querySelector('.line-chart');
+  const firstPoint = chart.querySelector('.chart-hit');
+  const chartScore = () => window.document.querySelector('.chart-selection-readout strong').textContent;
+  chart.querySelector('.chart-plot').getBoundingClientRect = () => ({
+    left:40, right:240, top:10, bottom:210, width:200
+  });
+  chart.setPointerCapture = () => {};
+  function chartPointer(type, pointerType, x){
+    const event = new window.MouseEvent(type, { bubbles:true, clientX:x, clientY:50 });
+    Object.assign(event, { pointerType, pointerId:1, isPrimary:true });
+    firstPoint.dispatchEvent(event);
+  }
+  chartPointer('pointermove', 'mouse', 40);
+  eq(chartScore(), '110', 'Hover previews the plotted score');
+  chartPointer('pointermove', 'mouse', 140);
+  eq(chartScore(), '—', 'Hover over an unknown day shows a gap');
+  chartPointer('pointerleave', 'mouse', 245);
+  eq(chartScore(), '130', 'Leaving the chart restores the selected date');
+  chartPointer('pointerdown', 'touch', 40);
+  await waitFor(() => chartScore() === '110');
+  chartPointer('pointermove', 'touch', 240);
+  eq(chartScore(), '130', 'Sliding a held finger previews another day');
+  chartPointer('pointerup', 'touch', 240);
+  const tapClick = () => firstPoint.dispatchEvent(new window.MouseEvent('click', { bubbles:true, detail:1 }));
+  tapClick();
+  eq(window.eval('selectedDayKey'), null, 'Releasing a long press leaves detail closed');
+  chartPointer('pointerdown', 'touch', 40);
+  chartPointer('pointerup', 'touch', 40);
+  tapClick();
+  eq(window.eval('selectedDayKey'), d1, 'The next quick tap opens the tapped day');
+  window.closeDayActivity();
+
+  const sparseChartStart = window.addDaysToKey(today, -89);
+  setLedger({ start:sparseChartStart, entries:[{ id:'sparse', date:d1, name:'Credit', type:'good', points:10, ts:1 }] });
+  window.eval('historyRangeDays = 90');
+  window.renderHistory();
+  const sparseHit = window.document.querySelector('.chart-hit');
+  const sparseDot = window.document.querySelector('.chart-dot');
+  const hitStart = Number(sparseHit.getAttribute('x'));
+  const hitWidth = Number(sparseHit.getAttribute('width'));
+  const dotCenter = Number(sparseDot.getAttribute('cx'));
+  const dotRadius = Number(sparseDot.getAttribute('r'));
+  ok(hitStart <= dotCenter - dotRadius && hitStart + hitWidth >= dotCenter + dotRadius,
+    'A sparse point on the 90-day chart has a tap target that covers the entire dot');
+  sparseDot.dispatchEvent(new window.MouseEvent('click', { bubbles:true, detail:1 }));
+  eq(window.eval('selectedDayKey'), d1, 'Clicking a visible dot opens its own activity');
+  window.closeDayActivity();
+
+  const tripStart = window.addDaysToKey(today, -3);
+  const beforeTrip = window.addDaysToKey(today, -4);
+  setLedger({
+    start:beforeTrip,
+    dailyBonuses:[{ id:'no_debits', name:'No debits', points:5, description:'' }],
+    milestones:[{ id:'twice', name:'Two days', days:2, points:20, description:'' }],
+    completedDays:[{ id:'marked', date:d1, ts:2 }],
+    entries:[
+      { id:'before', date:beforeTrip, name:'Walk', type:'good', points:1, ts:1, habitId:'walk' },
+      { id:'vacation', date:tripStart, name:'Holiday credit', type:'bonus', points:100, ts:2, bonusId:'holiday_bonus' },
+      { id:'loss', date:d1, name:'Holiday debit', type:'bad', points:-99, ts:3, habitId:'holiday_debit' },
+      { id:'return', date:d2, name:'Walk', type:'good', points:1, ts:4, habitId:'walk' }
+    ]
+  });
+  window.eval("habits = [{id:'walk',name:'Walk',type:'good',points:1,streak:0,lastDate:null,order:0,sectionId:null}]");
+  window.eval("habits.push({id:'holiday_debit',name:'Holiday debit',type:'bad',points:99,streak:0,lastDate:null,order:1,sectionId:null}); bonusTasks = [{id:'holiday_bonus',name:'Holiday credit',points:100,order:0,sectionId:null}]");
+  const rawTripEntries = JSON.stringify(window.buildSnapshot().data.entries);
+  const beforePausing = JSON.stringify(window.dailyTotalsByDate());
+  window.document.querySelector('#todayView [data-action="open-travel"]').click();
+  window.document.getElementById('travelStart').value = tripStart;
+  window.document.getElementById('travelEnd').value = d1;
+  window.document.getElementById('saveTravel').click();
+  eq(window.dailyTotalsByDate()[tripStart], undefined, 'Retroactive pause excludes the entire +100 day and its automatic bonus');
+  eq(window.computeStats().currentStreak, 2, 'Paused debit and completion mark cannot break or advance a streak');
+  eq(window.computeStats().daysTracked, 2, 'Statistics skip both paused dates');
+  eq(window.computeStats().biggestDrains.length, 0, 'Paused debits are excluded from contributors');
+  window.eval(`todayViewDate = '${d1}'`);
+  window.renderHabitList();
+  ok(window.document.querySelector('[data-task-row][data-id="holiday_debit"]').textContent.includes('1× this day'),
+    'A habit row still counts entries on the selected paused day');
+  eq(window.taskActivity('habit', d1).counts.has('holiday_debit'), false, 'A paused habit log does not count toward usage sorting');
+  window.eval(`todayViewDate = '${tripStart}'`);
+  window.renderBonusList();
+  ok(window.document.querySelector('[data-task-row][data-id="holiday_bonus"]').textContent.includes('1× this day'),
+    'A bonus row still counts entries on the selected paused day');
+  eq(window.taskActivity('bonus', tripStart).counts.has('holiday_bonus'), false, 'A paused bonus log does not count toward usage sorting');
+  window.eval(`todayViewDate = '${today}'`);
+  eq(window.eval("habits[0].streak"), 2, 'Habit streak bridges both vacation days');
+  eq(window.deriveMilestoneEntries()[0].date, d2, 'Milestone moves to the next qualifying closed day');
+  eq(window.deriveDailyBonusEntries().length, 2, 'No daily bonus is earned on vacation');
+  ok(window.buildActivityCsv().split('\n').some(row => row.includes('Holiday credit') && row.includes('false')), 'Activity export marks the original credit as excluded');
+  eq(JSON.stringify(window.buildSnapshot().data.entries), rawTripEntries, 'Travel mode preserves original entries');
+  const tripSnapshot = window.buildSnapshot();
+  const tripId = tripSnapshot.data.travelPauses[0].id;
+  eq(window.parseFullCsvBackup(window.buildFullCsvBackup().text).travelPauses[0].end, d1, 'Full CSV restores inclusive travel dates');
+  eq(window.validateBackupObject(window.buildExport()).travelPauses[0].start, tripStart, 'JSON export restores the pause start');
+  window.openDayActivity(tripStart);
+  ok(window.document.getElementById('daySummary').textContent.includes('Paused') &&
+     window.document.getElementById('dayActivityList').textContent.includes('Holiday credit'), 'History explains the exclusion beside the original entry');
+  window.document.querySelector('#dayCompletionControl [data-action="open-travel"]').click();
+  window.document.getElementById('travelStart').value = d1;
+  window.document.getElementById('saveTravel').click();
+  eq(window.dailyTotalsByDate()[tripStart], 125, 'Shortening a pause restores the credit and its earned rewards');
+  window.openTravel(d1);
+  window.document.getElementById('removeTravel').click();
+  eq(JSON.stringify(window.dailyTotalsByDate()), beforePausing, 'Removing the trip restores every original score');
+  window.closeDayActivity();
+
+  window.openTravel(today);
+  window.document.getElementById('travelStart').value = d2;
+  window.document.getElementById('saveTravel').click();
+  eq(window.document.getElementById('scoreEl').textContent, '—', 'Open-ended pause hides the baseline score');
+  eq(window.parseFullCsvBackup(window.buildFullCsvBackup().text).travelPauses[0].end, null, 'An open-ended pause round-trips through CSV');
+  eq(window.countingDaysBetween(today, window.addDaysToKey(today, 30)), 0, 'An open pause removes future days from projected gains');
+  window.openTravel(today);
+  window.document.querySelector('[data-action="resume-travel"]').click();
+  eq(window.buildSnapshot().data.travelPauses[0].end, d2, 'Resume today leaves yesterday paused');
+  eq(window.pauseOn(today), null, 'Today counts immediately after resuming');
+
+  const concurrentTrip = structuredClone(tripSnapshot);
+  concurrentTrip.data.travelPauses.push({ id:'next_trip', start:today, end:null });
+  const editedTrip = structuredClone(tripSnapshot);
+  editedTrip.data.travelPauses[0].end = tripStart;
+  const mergedTrips = window.mergeConcurrentSnapshots(tripSnapshot, editedTrip, concurrentTrip).snapshot;
+  eq(mergedTrips.data.travelPauses.length, 2, 'Sync keeps concurrent trip additions alongside edits');
+  eq(mergedTrips.data.travelPauses.find(p => p.id === tripId).end, tripStart, 'Sync preserves the edited end date');
+  window.applyValidatedState(window.validateBackupObject(mergedTrips));
+  eq(window.isDayTracked(tripStart), false, 'Restoring a synced snapshot reapplies a one-day pause');
+  eq(window.isDayTracked(d1), true, 'The day after a one-day pause counts normally');
+
+  const peerTrip = structuredClone(tripSnapshot);
+  peerTrip.data.travelPauses[0].start = d1;
+  const extendedTrip = structuredClone(tripSnapshot);
+  extendedTrip.data.travelPauses[0].end = today;
+  const expectedTrip = { id:tripId, start:d1, end:today };
+  const { snapshot:mergedDates, hadDirectConflict } = window.mergeConcurrentSnapshots(tripSnapshot, extendedTrip, peerTrip);
+  eq(JSON.stringify(mergedDates.data.travelPauses[0]), JSON.stringify(expectedTrip), 'Sync combines edits to opposite bounds of a pause');
+  eq(hadDirectConflict, false, 'Independent changes to a pause need no conflict warning');
+
+  window.applyValidatedState(window.validateBackupObject(tripSnapshot));
+  window.openTravel(tripStart);
+  window.document.getElementById('travelEnd').value = today;
+  window.applyValidatedState(window.validateBackupObject(peerTrip));
+  window.renderAll();
+  window.document.getElementById('saveTravel').click();
+  eq(JSON.stringify(window.buildSnapshot().data.travelPauses[0]), JSON.stringify(expectedTrip),
+    'Saving an open travel form retains a synced change to its untouched date');
+
+  window.openTravel(d1);
+  window.document.getElementById('travelEnd').value = '';
+  const shortenedTrip = window.buildSnapshot();
+  shortenedTrip.data.travelPauses[0].end = d2;
+  window.applyValidatedState(window.validateBackupObject(shortenedTrip));
+  window.document.getElementById('saveTravel').click();
+  ok(window.document.getElementById('travelError').textContent.includes('changed elsewhere'),
+    'An open travel form flags conflicting edits to the same date');
+  eq(window.buildSnapshot().data.travelPauses[0].end, d2, 'A conflicting form save preserves the latest synced date');
+  window.closeDialog('travelOverlay');
+
+  const overlapBase = structuredClone(tripSnapshot);
+  const overlapLocal = structuredClone(overlapBase);
+  overlapLocal.data.travelPauses[0].end = today;
+  const overlapRemote = structuredClone(overlapBase);
+  overlapRemote.data.travelPauses.push({ id:'overlap_trip', start:d1, end:null });
+  const overlappingTrips = window.mergeConcurrentSnapshots(overlapBase, overlapLocal, overlapRemote).snapshot;
+  window.applyValidatedState(window.validateBackupObject(overlappingTrips));
+  window.openTravel(tripStart);
+  window.document.getElementById('travelEnd').value = d2;
+  window.document.getElementById('saveTravel').click();
+  eq(window.buildSnapshot().data.travelPauses.find(p => p.id === tripId).end, d2,
+    'A synced overlap can be shortened even when some overlap remains');
+  window.openTravel(tripStart);
+  window.document.getElementById('travelEnd').value = today;
+  window.document.getElementById('saveTravel').click();
+  ok(window.document.getElementById('travelError').textContent.includes('overlap'), 'Expanding an existing overlap is rejected');
+  eq(window.buildSnapshot().data.travelPauses.find(p => p.id === tripId).end, d2, 'A rejected overlap leaves the saved trip intact');
+  window.closeDialog('travelOverlay');
 
   let seed = 0x5eed1234;
   const random = () => {
@@ -995,6 +1179,30 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
   function cloudEntryIds(cloud){
     return cloud.snapshot.data.entries.map(entry => entry.id).sort().join(',');
   }
+
+  const csvDevice = await openTestLedger(null, null, { offline:true, localCopies:{ 'tally-trusted-device-v1':'1' } });
+  const emptyCsv = csvDevice.buildFullCsvBackup().text;
+  csvDevice.openBackup();
+  const csvInput = csvDevice.document.getElementById('csvRestoreFileInput');
+  let finishOldCsvRead;
+  const oldFileRead = new Promise(resolve => { finishOldCsvRead = resolve; });
+  const oldCsvFile = { size:emptyCsv.length, text:() => oldFileRead };
+  const newCsvFile = { size:csv.length, text:async () => csv };
+  function chooseCsv(file){
+    Object.defineProperty(csvInput, 'files', { configurable:true, value:[file] });
+    csvInput.dispatchEvent(new csvDevice.Event('change'));
+  }
+  chooseCsv(oldCsvFile);
+  chooseCsv(newCsvFile);
+  await waitFor(() => !csvDevice.document.getElementById('restoreCsvBtn').disabled);
+  finishOldCsvRead(emptyCsv);
+  await oldFileRead;
+  const restoreCsv = csvDevice.doCsvRestore();
+  csvDevice.resolveConfirm(true);
+  await restoreCsv;
+  eq(csvDevice.buildSnapshot().data.entries.map(entry => entry.id).join(','), 'entry_a,entry_b',
+    'Restore uses the selected CSV after an earlier file finishes reading late');
+  csvDevice.close();
 
   const staleFactory = new IDBFactory();
   const staleCloud = { revision:0, snapshot:null, updatedAt:null };
@@ -1144,6 +1352,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
       entries.push({id:'cloud_a',date:'${cloudDate}',name:'Cloud A',type:'good',points:1,ts:11});
       taskSections.push({id:'cloud_habit_topic',name:'Cloud topic',kind:'habit',order:0});
       habits.push({id:'cloud_habit',name:'Cloud habit',type:'good',points:4,streak:0,lastDate:null,order:7,sectionId:'cloud_habit_topic'});
+      setTravelPauses([{id:'cloud_trip',start:addDaysToKey(todayKey(),10),end:null}]);
       dailyBonuses.push({id:'cloud_daily_a',name:'No debits A',points:80,description:'Daily reward A'});
       taskSortModes.habit = 'name-desc';
       persistData()
@@ -1166,6 +1375,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
   const readerFactory = new IDBFactory();
   const cloudReader = createRaceBrowser(readerFactory, sharedCloud);
   await waitFor(() => cloudReader.browser.window.document.getElementById('loadingScreen').style.display === 'none');
+  eq(cloudReader.browser.window.buildSnapshot().data.travelPauses[0].id, 'cloud_trip', 'Another device receives a scheduled pause after concurrent sync');
   const cloudIds = cloudReader.browser.window.eval('entries.map(entry => entry.id).sort()');
   eq(JSON.stringify(cloudIds), JSON.stringify(['cloud_a', 'cloud_b']), 'Two separate devices merge independent cloud writes without lost data');
   eq(cloudReader.browser.window.eval(`habits.find(item => item.id === 'cloud_habit').order`), 7, 'Cloud merge preserves explicit manual habit order');
@@ -1208,6 +1418,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
   eq(offlineReload.browser.window.eval('appReady'), true, 'A previously trusted device reopens from durable storage while offline');
   eq(offlineReload.browser.window.deriveDailyBonusEntries().length, 10, 'Reopening offline after three days catches up all eligible daily rewards from persisted rules');
   eq(offlineReload.browser.window.eval('entries.length'), 2, 'Offline catch-up preserves manual source entries without storing duplicate automatic rewards');
+  eq(offlineReload.browser.window.buildSnapshot().data.travelPauses[0].id, 'cloud_trip', 'Offline reopen preserves synced travel dates');
   const offlineAwardIds = offlineReload.browser.window.deriveDailyBonusEntries().map(entry => entry.id).join(',');
   offlineReload.browser.window.dispatchEvent(new offlineReload.browser.window.Event('pageshow'));
   eq(offlineReload.browser.window.deriveDailyBonusEntries().map(entry => entry.id).join(','), offlineAwardIds, 'Repeated offline page resumes do not duplicate caught-up rewards');
@@ -1306,7 +1517,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
     'A higher revision written to the legacy keys cannot replace current IndexedDB entries or bonus rules');
   eq((await reloadedWindow.readCloudBaseRecord()).cloudRevision, 5,
     'Migration keeps the newest legacy sync base and protects it from later legacy writes');
-  reloadedWindow.localStorage.setItem('tally-cloud-base-v7', JSON.stringify({
+  reloadedWindow.localStorage.setItem(reloadedWindow.eval('CLOUD_BASE_FALLBACK_KEY'), JSON.stringify({
     cloudRevision:8, localRevision:updatedSnapshot.revision, snapshot:updatedSnapshot
   }));
   await reloadedWindow.eval("entries = entries.filter(entry => entry.id !== 'updated_entry'); persistData()");
@@ -1317,7 +1528,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
   reloadedWindow.close();
 
   const stagedCopies = {
-    'tally-state-v2':JSON.stringify(updatedSnapshot),
+    'tally-state-v7':JSON.stringify({ ...updatedSnapshot, schemaVersion:7 }),
     'tally-recovery-v2':JSON.stringify(legacySnapshot),
     'tally-trusted-device-v1':'1'
   };
@@ -1331,13 +1542,15 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
   const protectedMirror = fallbackWindow.localStorage.getItem(fallbackWindow.eval('FALLBACK_STATE_KEY'));
   eq(JSON.stringify(JSON.parse(protectedMirror).data), JSON.stringify(updatedSnapshot.data),
     'Backgrounding the app during startup still migrates existing version-7 data');
+  const fallbackKey = fallbackWindow.eval('FALLBACK_STATE_KEY');
   fallbackWindow.close();
   const fallbackReload = createRaceBrowser(null, null, {
     offline:true,
     localCopies:{
       ...stagedCopies,
       'tally-state-v2':JSON.stringify(staleSnapshot),
-      'tally-state-v7':protectedMirror
+      'tally-state-v7':JSON.stringify(staleSnapshot),
+      [fallbackKey]:protectedMirror
     }
   });
   const fallbackReloadWindow = fallbackReload.browser.window;
@@ -1348,12 +1561,132 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
   eq(fallbackReloadWindow.localStorage.length, 0, 'Sign-out cleanup clears both generations of browser storage');
   fallbackReloadWindow.close();
 
+  const v7Ledger = structuredClone(existingCloudSnapshot);
+  v7Ledger.revision = 20;
+  v7Ledger.data.entries.push({ id:'both_edited', date:cloudDate, name:'Shared entry', type:'good', points:1, ts:3 });
+  v7Ledger.data.entries.push({ id:'v7_deleted', date:cloudDate, name:'To remove in v7', type:'good', points:5, ts:4 });
+  const v7LateSave = structuredClone(v7Ledger);
+  v7LateSave.revision += 3;
+  v7LateSave.data.entries[0].points = 25;
+  v7LateSave.data.entries.find(entry => entry.id === 'both_edited').points = 11;
+  v7LateSave.data.entries = v7LateSave.data.entries.filter(entry => entry.id !== 'v7_deleted');
+  v7LateSave.data.entries.push({ id:'late_v7', date:cloudDate, name:'Late save from v7', type:'good', points:4, ts:5 });
+  const v7Storage = { 'tally-state-v7':JSON.stringify(v7Ledger), 'tally-trusted-device-v1':'1' };
+  const mixedVersionFactory = new IDBFactory();
+  const firstV8 = await openTestLedger(mixedVersionFactory, null, { offline:true, localCopies:v7Storage });
+  await firstV8.eval("entries.find(entry => entry.id === 'cloud_only').points = 32; entries.find(entry => entry.id === 'both_edited').points = 12; setTravelPauses([{id:'keep_trip',start:todayKey(),end:null}]); persistData()");
+  await firstV8.idbPut('state-v7', v7LateSave);
+  await firstV8.idbPut('previous-v7', { ...v7LateSave, revision:v7LateSave.revision - 1 });
+  firstV8.closeDeviceDatabase();
+  firstV8.close();
+
+  const trustedCopies = { 'tally-trusted-device-v1':'1' };
+  for(const factory of [new IDBFactory(), null]){
+    const migrationCloud = { revision:0, snapshot:null, updatedAt:null };
+    const device = await openTestLedger(factory, migrationCloud, { localCopies:v7Storage });
+    if(factory) await device.idbPut('state-v7', v7LateSave);
+    else device.localStorage.setItem('tally-state-v7', JSON.stringify(v7LateSave));
+    const signingOut = device.signOutAndClearDevice();
+    device.resolveConfirm(true);
+    await signingOut;
+    eq(cloudEntryIds(migrationCloud), 'both_edited,cloud_only,late_v7,legacy_entry',
+      'Sign-out syncs late v7 additions and deletions before clearing device storage');
+    eq(migrationCloud.snapshot.data.entries.find(entry => entry.id === 'legacy_entry')?.points, 25,
+      'Sign-out syncs a late v7 edit to an existing entry');
+    eq(device.localStorage.length, 0, 'Sign-out removes the local migration checkpoint after syncing');
+    device.close();
+  }
+
+  const lateSignOutFactory = new IDBFactory();
+  const lateSignOut = await openTestLedger(lateSignOutFactory, null, { localCopies:v7Storage });
+  const originalFetch = lateSignOut.fetch;
+  lateSignOut.fetch = async (input, options) => {
+    if(String(input) === '/api/auth/sign-out') await lateSignOut.idbPut('state-v7', v7LateSave);
+    return originalFetch(input, options);
+  };
+  const signingOut = lateSignOut.signOutAndClearDevice();
+  lateSignOut.resolveConfirm(true);
+  await signingOut;
+  eq((await lateSignOut.idbGet('state-v7')).revision, v7LateSave.revision,
+    'A newer v7 save arriving after the final sync prevents device deletion');
+  lateSignOut.closeDeviceDatabase();
+  lateSignOut.close();
+
+  const initialFallbackV8 = await openTestLedger(null, null, { offline:true, localCopies:v7Storage });
+  await initialFallbackV8.eval("entries.find(entry => entry.id === 'cloud_only').points = 32; persistData()");
+  const fallbackCopies = Object.fromEntries(Object.keys(initialFallbackV8.localStorage).map(key =>
+    [key, initialFallbackV8.localStorage.getItem(key)]));
+  initialFallbackV8.close();
+  const recoveredFallbackV8 = await openTestLedger(null, null, {
+    offline:true,
+    localCopies:{
+      ...fallbackCopies,
+      'tally-state-v7':JSON.stringify(v7LateSave),
+      'tally-state-previous-v7':JSON.stringify({ ...v7LateSave, revision:v7LateSave.revision - 1 })
+    }
+  });
+  const recoveredFallbackEntries = recoveredFallbackV8.buildSnapshot().data.entries;
+  eq(recoveredFallbackEntries.map(entry => entry.id).sort().join(','), 'both_edited,cloud_only,late_v7,legacy_entry',
+    'Browser-storage migration recovers v7 additions and deletions after the old previous copy rotates');
+  eq(recoveredFallbackEntries.find(entry => entry.id === 'legacy_entry')?.points, 25,
+    'Browser-storage migration recovers a late v7 edit using the saved checkpoint');
+  eq(recoveredFallbackEntries.find(entry => entry.id === 'cloud_only')?.points, 32,
+    'Browser-storage migration preserves an independent v8 edit');
+  recoveredFallbackV8.close();
+
+  const recoveredV8 = await openTestLedger(mixedVersionFactory, null, { offline:true, localCopies:trustedCopies });
+  const recoveredState = recoveredV8.buildSnapshot();
+  eq(recoveredState.data.entries.map(entry => entry.id).sort().join(','), 'both_edited,cloud_only,late_v7,legacy_entry',
+    'Reload merges late v7 additions and deletions even after the v7 previous copy rotates');
+  eq(recoveredState.data.entries.find(entry => entry.id === 'legacy_entry')?.points, 25,
+    'Reload recovers a v7 edit to an existing entry when the common ledger is known');
+  eq(recoveredState.data.entries.find(entry => entry.id === 'cloud_only')?.points, 32, 'Late v7 recovery preserves an independent v8 edit');
+  eq(recoveredState.data.entries.find(entry => entry.id === 'both_edited')?.points, 12, 'A conflicting v7 edit keeps the current v8 value');
+  eq(recoveredState.data.travelPauses[0]?.id, 'keep_trip', 'Late v7 recovery preserves travel pauses');
+  eq(recoveredV8.buildExport().migratedV7Revision, undefined, 'Migration metadata stays out of backups');
+  await recoveredV8.eval("entries = entries.filter(entry => entry.id !== 'late_v7'); persistData()");
+  recoveredV8.closeDeviceDatabase();
+  recoveredV8.close();
+
+  const restartedV8 = await openTestLedger(mixedVersionFactory, null, { offline:true, localCopies:trustedCopies });
+  eq(restartedV8.buildSnapshot().data.entries.some(entry => entry.id === 'late_v7'), false,
+    'Reload does not reimport a previously recovered v7 entry after its deletion');
+  restartedV8.closeDeviceDatabase();
+  restartedV8.close();
+
+  const unmarkedV8 = { ...recoveredState, data:{ ...recoveredState.data, entries:updatedSnapshot.data.entries } };
+  const fallbackV8 = await openTestLedger(null, null, {
+    offline:true,
+    localCopies:{ ...trustedCopies, [fallbackKey]:JSON.stringify(unmarkedV8), 'tally-state-v7':JSON.stringify(v7LateSave) }
+  });
+  eq(fallbackV8.buildSnapshot().data.entries.map(entry => entry.id).sort().join(','), 'both_edited,cloud_only,late_v7,legacy_entry,updated_entry',
+    'An existing v8 browser-storage copy recovers independent v7 records without a migration checkpoint');
+  eq(fallbackV8.buildSnapshot().data.entries.find(entry => entry.id === 'legacy_entry')?.points, unmarkedV8.data.entries[0].points,
+    'Without confirmed ancestry, recovery keeps the current version of shared records');
+  await fallbackV8.eval("entries = entries.filter(entry => entry.id !== 'late_v7'); persistData()");
+  const fallbackAfterDelete = fallbackV8.localStorage.getItem(fallbackKey);
+  fallbackV8.close();
+  const fallbackAfterRestart = await openTestLedger(null, null, {
+    offline:true,
+    localCopies:{ ...trustedCopies, [fallbackKey]:fallbackAfterDelete, 'tally-state-v7':JSON.stringify(v7LateSave) }
+  });
+  eq(fallbackAfterRestart.buildSnapshot().data.entries.some(entry => entry.id === 'late_v7'), false,
+    'The browser-storage checkpoint also prevents reimporting a deleted recovered entry');
+  fallbackAfterRestart.close();
+
   // Exercise a deployment where older markup ends up with the current script.
   const legacyMarkup = html
     .replace(/id="dailyBonusList"/, 'id="legacyBonusList"')
-    .replace(/id="dailyBonus(?:Name|Points|Description)"/g, '');
+    .replace(/id="dailyBonus(?:Name|Points|Description)"/g, '')
+    .replace(/<div class="overlay" id="travelOverlay">[\s\S]*?(?=<!-- Automatic daily bonus modal -->)/, '');
   const legacyShell = createRaceBrowser(new IDBFactory(), null, { markup:legacyMarkup });
   await waitFor(() => legacyShell.browser.window.eval('appReady'));
+  const legacyWindow = legacyShell.browser.window;
+  legacyWindow.eval("setTravelPauses([{id:'active_trip',start:todayKey(),end:null}]); renderAll()");
+  eq(legacyWindow.document.getElementById('scoreEl').textContent, '—', 'Older markup still displays active pauses');
+  eq(legacyWindow.document.querySelector('#todayCompletionControl [data-action="open-travel"]'), null,
+    'Older markup omits the edit action when it has no travel dialog');
+  legacyWindow.document.querySelector('#todayView [data-action="open-travel"]').click();
   ok(!legacyShell.errors.length, 'The current script can boot with older cached markup', legacyShell.errors.join(' | '));
   legacyShell.browser.window.close();
 
@@ -1369,7 +1702,7 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
       precacheRuns++;
       for(const request of requests){
         const route = new URL(request.url).pathname;
-        const body = route === '/tally-v8.html' ? shellHtml : route;
+        const body = route === clientPath.replace('.js', '.html') ? shellHtml : route;
         shellAssets.set(route, body);
       }
     },

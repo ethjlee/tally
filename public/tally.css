@@ -429,17 +429,18 @@
   .history-rate{
     font-size:11px; color:var(--muted); letter-spacing:.02em;
   }
-  .line-chart{ display:block; width:100%; height:220px; overflow:visible; }
+  .line-chart{ display:block; width:100%; height:220px; overflow:visible; touch-action:pan-y pinch-zoom; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+  .chart-hint{ margin:10px 2px 2px; color:var(--muted); font-size:11px; }
   .chart-grid{ stroke:var(--line); stroke-width:1; vector-effect:non-scaling-stroke; }
   .chart-baseline{ stroke:var(--ivory); stroke-width:1.3; stroke-dasharray:5 4; opacity:.65; vector-effect:non-scaling-stroke; }
   .chart-score-line{ fill:none; stroke:var(--gain); stroke-width:2.25; stroke-linejoin:round; stroke-linecap:round; vector-effect:non-scaling-stroke; }
   .chart-score-gap{ fill:none; stroke:var(--gain); stroke-width:2.25; stroke-dasharray:4 5; stroke-linecap:round; opacity:.72; vector-effect:non-scaling-stroke; }
   .chart-average-line{ fill:none; stroke:var(--bonus); stroke-width:2; stroke-linejoin:round; stroke-linecap:round; vector-effect:non-scaling-stroke; }
   .chart-average-gap{ fill:none; stroke:var(--bonus); stroke-width:2; stroke-dasharray:4 5; stroke-linecap:round; opacity:.62; vector-effect:non-scaling-stroke; }
-  .chart-dot{ fill:var(--panel); stroke:var(--gain); stroke-width:2; vector-effect:non-scaling-stroke; }
+  .chart-dot{ fill:var(--panel); stroke:var(--gain); stroke-width:2; vector-effect:non-scaling-stroke; cursor:pointer; }
   .chart-dot.success{ fill:var(--gain); }
   .chart-selected-guide{ stroke:var(--ivory); stroke-width:1; stroke-dasharray:3 4; opacity:.7; vector-effect:non-scaling-stroke; }
-  .chart-selected-dot{ fill:var(--ivory); stroke:var(--ink); stroke-width:1.5; vector-effect:non-scaling-stroke; }
+  .chart-selected-dot{ fill:var(--ivory); stroke:var(--ink); stroke-width:1.5; vector-effect:non-scaling-stroke; cursor:pointer; }
   .chart-hit{ fill:transparent; cursor:pointer; }
   .chart-hit:focus-visible{ fill:rgba(240,193,75,.08); stroke:var(--gain); stroke-width:1.5; outline:none; }
   .chart-axis-label{ fill:var(--muted); font-size:9.5px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
@@ -666,6 +667,10 @@
     z-index:20; padding:0;
   }
   .overlay.show{ display:flex; }
+  #travelOverlay{ z-index:24; }
+  #travelList{ margin:12px 0; max-height:24vh; overflow:auto; }
+  .chart-paused{ fill:var(--muted); opacity:.14; pointer-events:none; }
+  .legend-swatch.paused{ border:0; height:8px; background:var(--muted); opacity:.45; }
   #entryOverlay{ z-index:24; }
   #confirmOverlay{ z-index:25; }
   @media (min-width:480px){

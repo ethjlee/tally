@@ -5,6 +5,9 @@ let dailyBonuses = []; // {id, name, points, description}; automatic no-debit re
 let taskSections = []; // {id, name, kind:'habit'|'bonus', order}
 let entries = [];     // {id, date, name, type:'good'|'bad'|'bonus', points, ts}
 let milestones = [];  // {id, name, days, points, description}
+let travelPauses = [];
+let pauseIntervals = [];
+let editingPause = null;
 let completedDays = []; // {id, date, ts}; explicit no-entry day confirmations
 let dailyBase = 100;  // score you start each day at, before credits/debits/bonuses
 let successThreshold = 80; // score at/above this = a "success" day
@@ -115,9 +118,48 @@ function inferredStartDate(candidateEntries, hour = dayStartHour){
 }
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
+// Keep editable trips by ID, and merge their coverage for fast score lookups.
+function setTravelPauses(pauses){
+  travelPauses = pauses;
+  pauseIntervals = [];
+  for(const pause of pauses.slice().sort((a,b) => a.start.localeCompare(b.start))){
+    const last = pauseIntervals[pauseIntervals.length - 1];
+    const end = pause.end || '9999-12-31';
+    if(last && last.end >= pause.start){
+      if(last.end < end) last.end = end;
+    }else pauseIntervals.push({ start:pause.start, end });
+  }
+}
+function pauseOn(date){
+  let lo = 0, hi = pauseIntervals.length;
+  while(lo < hi){
+    const mid = (lo + hi) >>> 1;
+    const range = pauseIntervals[mid];
+    if(date < range.start) hi = mid;
+    else if(date > range.end) lo = mid + 1;
+    else return range;
+  }
+  return null;
+}
+function countingDaysBetween(start, end){
+  let count = calendarDaysInclusive(start, end);
+  for(const range of pauseIntervals){
+    if(range.start > end) break;
+    count -= calendarDaysInclusive(laterDateKey(start, range.start), end < range.end ? end : range.end);
+  }
+  return count;
+}
 function consecutiveHabitDays(dates, lastDate){
   let length = 0;
-  for(let date = lastDate; dates?.has(date); date = addDaysToKey(date, -1)) length++;
+  let date = lastDate;
+  while(date && dates?.size){
+    const pause = pauseOn(date);
+    if(pause) date = addDaysToKey(pause.start, -1);
+    else if(dates.has(date)){
+      length++;
+      date = addDaysToKey(date, -1);
+    }else break;
+  }
   return length;
 }
 
@@ -156,10 +198,11 @@ function taskActivity(kind, selectedDate){
     const key = isHabit ? entry.type + '\u0000' + entry.name : entry.name;
     const task = linkedId ? byId.get(linkedId) : byName.get(key);
     if(!task) continue;
+    const matchesTaskType = !isHabit || entry.type === task.type;
+    if(matchesTaskType && entry.date === selectedDate) selectedCounts.set(task.id, (selectedCounts.get(task.id) || 0) + 1);
+    if(pauseOn(entry.date)) continue;
     counts.set(task.id, (counts.get(task.id) || 0) + 1);
-    if(isHabit && entry.type !== task.type) continue;
-    if(entry.date === selectedDate) selectedCounts.set(task.id, (selectedCounts.get(task.id) || 0) + 1);
-    if(isHabit && entry.type === 'good' && entry.date <= selectedDate){
+    if(isHabit && matchesTaskType && entry.type === 'good' && entry.date <= selectedDate){
       if(!creditDates.has(task.id)) creditDates.set(task.id, new Set());
       creditDates.get(task.id).add(entry.date);
     }
@@ -357,10 +400,10 @@ function dayHasManualActivity(date){
   return entries.some(entry => entry.date === date);
 }
 function isDayTracked(date){
-  return dayHasManualActivity(date) || !!explicitCompletionForDate(date) || hasDailyBonusForDate(date);
+  return !pauseOn(date) && (dayHasManualActivity(date) || !!explicitCompletionForDate(date) || hasDailyBonusForDate(date));
 }
 function hasDailyBonusForDate(date){
-  return dailyBonuses.length > 0 && date >= statsStartKey() && date < todayKey() &&
+  return dailyBonuses.length > 0 && !pauseOn(date) && date >= statsStartKey() && date < todayKey() &&
     !entries.some(entry => entry.date === date && entry.type === 'bad');
 }
 function dailyBonusDateKeys(end = todayKey()){
@@ -369,7 +412,7 @@ function dailyBonusDateKeys(end = todayKey()){
   const debitDates = new Set(entries.filter(entry => entry.type === 'bad').map(entry => entry.date));
   const dates = [];
   for(let date = statsStartKey(); date <= lastDay; date = addDaysToKey(date, 1)){
-    if(!debitDates.has(date)) dates.push(date);
+    if(!pauseOn(date) && !debitDates.has(date)) dates.push(date);
   }
   return dates;
 }
@@ -390,13 +433,13 @@ function trackedDateKeys(end = todayKey(), bonusDates = dailyBonusDateKeys(end),
   for(const day of completedDays){
     if(day.date >= start && day.date <= end) dates.add(day.date);
   }
-  return [...dates].sort();
+  return [...dates].filter(date => !pauseOn(date)).sort();
 }
 function manualDailyTotalsByDate(end = todayKey()){
   const start = statsStartKey();
   const byDate = Object.create(null);
   for(const entry of entries){
-    if(entry.date < start || entry.date > end) continue;
+    if(entry.date < start || entry.date > end || pauseOn(entry.date)) continue;
     byDate[entry.date] = (byDate[entry.date] || 0) + (Number(entry.points) || 0);
   }
   return byDate;
@@ -500,23 +543,27 @@ function summarizeLedger(end = todayKey()){
 }
 
 /* ================= persistence ================= */
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const DB_NAME = 'tally-ledger';
 const DB_VERSION = 1;
 const DB_STORE = 'records';
 // Older cached clients can replace their own primary and recovery records at
 // startup. Keep the current ledger and sync base outside those write paths.
-const STATE_KEY = 'state-v7';
-const PREVIOUS_STATE_KEY = 'previous-v7';
-const RECOVERY_KEY = 'recovery-v7';
-const FALLBACK_STATE_KEY = 'tally-state-v7';
-const FALLBACK_PREVIOUS_KEY = 'tally-state-previous-v7';
-const EMERGENCY_STATE_KEY = 'tally-emergency-v7';
-const RECOVERY_STATE_KEY = 'tally-recovery-v7';
-const CLOUD_BASE_KEY = 'cloud-base-v7';
-const CLOUD_BASE_FALLBACK_KEY = 'tally-cloud-base-v7';
+const STATE_KEY = 'state-v8';
+const PREVIOUS_STATE_KEY = 'previous-v8';
+const RECOVERY_KEY = 'recovery-v8';
+const FALLBACK_STATE_KEY = 'tally-state-v8';
+const FALLBACK_PREVIOUS_KEY = 'tally-state-previous-v8';
+const EMERGENCY_STATE_KEY = 'tally-emergency-v8';
+const RECOVERY_STATE_KEY = 'tally-recovery-v8';
+const CLOUD_BASE_KEY = 'cloud-base-v8';
+const CLOUD_BASE_FALLBACK_KEY = 'tally-cloud-base-v8';
 const LEGACY_CLOUD_BASE_KEY = 'cloud-base-v1';
 const LEGACY_CLOUD_BASE_FALLBACK_KEY = 'tally-cloud-base-v1';
+const V7_MIGRATION_BASE_KEY = 'migration-base-v7';
+const V7_MIGRATION_BASE_FALLBACK_KEY = 'tally-migration-base-v7';
+const V7_DB_SNAPSHOTS = [['state-v7','previous ledger'], ['previous-v7','previous ledger copy'], ['recovery-v7','previous recovery copy']];
+const V7_LOCAL_SNAPSHOTS = ['tally-state-v7','tally-emergency-v7','tally-state-previous-v7','tally-recovery-v7'].map(key => [key,key]);
 const LEGACY_DB_SNAPSHOTS = [
   ['state', 'legacy on-device database'],
   ['previous', 'legacy previous database copy'],
@@ -534,9 +581,11 @@ const SAFE_ID = /^[a-z0-9_-]{1,80}$/i;
 const MAX_SYNC_BYTES = 5 * 1024 * 1024;
 const SYNC_COLLECTION_LIMITS = {
   taskSections:1000, habits:1000, bonusTasks:1000, dailyBonuses:1000, milestones:1000,
-  completedDays:100000, entries:100000
+  travelPauses:1000, completedDays:100000, entries:100000
 };
 let canUseLocalStorage = false;
+let migratedV7Revision = null;
+let pendingV7MigrationBase = null;
 let persistInFlight = null;
 let persistDirty = false;
 let persistFailed = false;
@@ -649,7 +698,7 @@ function validateBackupObject(parsed, forSync = true){
   let settings;
   let revision = 0;
   const sourceSchemaVersion = Number.isInteger(parsed.schemaVersion) ? parsed.schemaVersion : 1;
-  if([SCHEMA_VERSION,6,5,4,3,2].includes(parsed.schemaVersion) ||
+  if([SCHEMA_VERSION,7,6,5,4,3,2].includes(parsed.schemaVersion) ||
       (parsed.schemaVersion === 1 && isPlainObject(parsed.data))){
     data = parsed.data;
     settings = parsed.settings;
@@ -663,6 +712,14 @@ function validateBackupObject(parsed, forSync = true){
   if(!isPlainObject(data) || !isPlainObject(settings)) throw new Error('The backup is missing ledger data or settings.');
   if(forSync) validateSyncCollections(data);
 
+  const cleanPauses = requireArray(sourceSchemaVersion >= 8 ? data.travelPauses : [], 'Travel pauses').map(pause => {
+    if(!isPlainObject(pause) || !isValidDateKey(pause.start) ||
+       (pause.end !== null && (!isValidDateKey(pause.end) || pause.end < pause.start))){
+      throw new Error('A travel pause has an invalid date range.');
+    }
+    return { id:requireId(pause.id, 'Travel pause ID'), start:pause.start, end:pause.end };
+  });
+  ensureUniqueIds(cleanPauses, 'Travel pauses');
   const usesLegacySections = sourceSchemaVersion < 6;
   let cleanTaskSections = requireArray(data.taskSections == null ? [] : data.taskSections, 'Task sections').map((section, i) => {
     if(!isPlainObject(section)) throw new Error(`Task section ${i + 1} is invalid.`);
@@ -829,6 +886,7 @@ function validateBackupObject(parsed, forSync = true){
     bonusTasks: cleanBonuses,
     dailyBonuses: cleanDailyBonuses,
     milestones: cleanMilestones,
+    travelPauses: cleanPauses,
     completedDays: cleanCompletedDays,
     entries: cleanEntries,
     dailyBase: cleanDailyBase,
@@ -875,6 +933,7 @@ function buildSnapshot(){
       bonusTasks: bonusTasks.map(b => ({ ...b })),
       dailyBonuses: dailyBonuses.map(b => ({ ...b })),
       milestones: milestones.map(m => ({ ...m })),
+      travelPauses: travelPauses.map(p => ({ ...p })),
       completedDays: completedDays.map(day => ({ ...day })),
       entries: entries.map(e => ({ ...e }))
     },
@@ -895,6 +954,7 @@ function applyValidatedState(clean){
   bonusTasks = clean.bonusTasks;
   dailyBonuses = clean.dailyBonuses;
   milestones = clean.milestones;
+  setTravelPauses(clean.travelPauses);
   completedDays = clean.completedDays;
   entries = clean.entries;
   dailyBase = clean.dailyBase;
@@ -1008,6 +1068,8 @@ function idbHealthCheck(){
   });
 }
 function idbWriteState(snapshot, expectedRevision, preserveSameRevision = false){
+  const stored = snapshotForStorage(snapshot);
+  const migrationBase = pendingV7MigrationBase;
   return new Promise((resolve, reject) => {
     let tx;
     try{
@@ -1031,7 +1093,10 @@ function idbWriteState(snapshot, expectedRevision, preserveSameRevision = false)
           store.put(current.result, PREVIOUS_STATE_KEY);
         }catch(e){}
       }
-      store.put(snapshot, STATE_KEY);
+      store.put(stored, STATE_KEY);
+      if(migrationBase && migrationBase.revision === stored.migratedV7Revision){
+        store.put(migrationBase, V7_MIGRATION_BASE_KEY);
+      }
     };
     current.onerror = () => reject(current.error || new Error('Could not read current database state'));
     tx.oncomplete = () => resolve(outcome);
@@ -1040,16 +1105,17 @@ function idbWriteState(snapshot, expectedRevision, preserveSameRevision = false)
   });
 }
 async function saveRecoverySnapshot(label, snapshot){
+  const stored = snapshotForStorage(snapshot);
   let saved = false;
   try{
     if(tallyDb){
-      await idbPut(RECOVERY_KEY, { ...snapshot, recoveryLabel:label, recoveredAt:new Date().toISOString() });
+      await idbPut(RECOVERY_KEY, { ...stored, recoveryLabel:label, recoveredAt:new Date().toISOString() });
       saved = true;
     }
   }catch(e){
     console.warn('Tally: recovery snapshot could not be saved', e);
   }
-  if(safeLocalSet(RECOVERY_STATE_KEY, JSON.stringify(snapshot))) saved = true;
+  if(safeLocalSet(RECOVERY_STATE_KEY, JSON.stringify(stored))) saved = true;
   return saved;
 }
 
@@ -1071,6 +1137,7 @@ function snapshotFromClean(clean){
       bonusTasks:clean.bonusTasks.map(item => ({ ...item })),
       dailyBonuses:clean.dailyBonuses.map(item => ({ ...item })),
       milestones:clean.milestones.map(item => ({ ...item })),
+      travelPauses:clean.travelPauses.map(p => ({ ...p })),
       completedDays:clean.completedDays.map(item => ({ ...item })),
       entries:clean.entries.map(item => ({ ...item }))
     },
@@ -1086,7 +1153,7 @@ function snapshotFromClean(clean){
     }
   };
 }
-function mergeEntitiesById(baseItems, localItems, remoteItems, equal = valuesEqual){
+function mergeEntitiesById(baseItems, localItems, remoteItems, equal = valuesEqual, mergeEdits = null){
   const base = new Map(baseItems.map(item => [item.id, item]));
   const local = new Map(localItems.map(item => [item.id, item]));
   const remote = new Map(remoteItems.map(item => [item.id, item]));
@@ -1103,6 +1170,11 @@ function mergeEntitiesById(baseItems, localItems, remoteItems, equal = valuesEqu
     else if(equal(r, b)) chosen = l;
     else if(equal(l, r)) chosen = l;
     else {
+      const combined = mergeEdits && b && l && r && mergeEdits(b, l, r);
+      if(combined){
+        merged.push(combined);
+        continue;
+      }
       hadDirectConflict = true;
       // If one copy deleted an item while the other edited it, preserve the edit.
       // If both edited the same item, keep the local edit; the complete remote
@@ -1112,6 +1184,14 @@ function mergeEntitiesById(baseItems, localItems, remoteItems, equal = valuesEqu
     if(chosen != null) merged.push({ ...chosen });
   }
   return { items:merged, hadDirectConflict };
+}
+function mergeTravelPauseDates(base, local, remote){
+  const startConflict = local.start !== base.start && remote.start !== base.start && local.start !== remote.start;
+  const endConflict = local.end !== base.end && remote.end !== base.end && local.end !== remote.end;
+  const start = local.start === base.start ? remote.start : local.start;
+  const end = local.end === base.end ? remote.end : local.end;
+  if(startConflict || endConflict || (end && end < start)) return null;
+  return { id:base.id, start, end };
 }
 function habitDefinition(habit){
   if(!habit) return habit;
@@ -1126,10 +1206,12 @@ function mergeConcurrentSnapshots(baseSnapshot, localSnapshot, remoteSnapshot){
   const dailyBonusMerge = mergeEntitiesById(base.data.dailyBonuses || [], localSnapshot.data.dailyBonuses || [], remoteSnapshot.data.dailyBonuses || []);
   const taskSectionMerge = mergeEntitiesById(base.data.taskSections || [], localSnapshot.data.taskSections || [], remoteSnapshot.data.taskSections || []);
   const milestoneMerge = mergeEntitiesById(base.data.milestones, localSnapshot.data.milestones, remoteSnapshot.data.milestones);
+  const pauseMerge = mergeEntitiesById(base.data.travelPauses || [], localSnapshot.data.travelPauses || [],
+    remoteSnapshot.data.travelPauses || [], valuesEqual, mergeTravelPauseDates);
   const completedDayMerge = mergeEntitiesById(base.data.completedDays, localSnapshot.data.completedDays, remoteSnapshot.data.completedDays);
   const entryMerge = mergeEntitiesById(base.data.entries, localSnapshot.data.entries, remoteSnapshot.data.entries);
   const settings = {};
-  let hadDirectConflict = habitsMerge.hadDirectConflict || bonusMerge.hadDirectConflict || dailyBonusMerge.hadDirectConflict || taskSectionMerge.hadDirectConflict ||
+  let hadDirectConflict = pauseMerge.hadDirectConflict || habitsMerge.hadDirectConflict || bonusMerge.hadDirectConflict || dailyBonusMerge.hadDirectConflict || taskSectionMerge.hadDirectConflict ||
     milestoneMerge.hadDirectConflict || completedDayMerge.hadDirectConflict || entryMerge.hadDirectConflict;
   const sectionKinds = new Map(taskSectionMerge.items.map(section => [section.id, section.kind]));
   for(const [kind, items] of [['habit', habitsMerge.items], ['bonus', bonusMerge.items]]){
@@ -1192,6 +1274,7 @@ function mergeConcurrentSnapshots(baseSnapshot, localSnapshot, remoteSnapshot){
         bonusTasks:bonusMerge.items,
         dailyBonuses:dailyBonusMerge.items,
         milestones:milestoneMerge.items,
+        travelPauses:pauseMerge.items,
         completedDays:completed,
         entries:entryMerge.items
       },
@@ -1210,21 +1293,29 @@ function parseStoredSnapshot(raw){
     return null;
   }
 }
+function storedV7Revision(raw){
+  const revision = raw?.migratedV7Revision;
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+function snapshotForStorage(snapshot){
+  return migratedV7Revision === null ? snapshot : { ...snapshot, migratedV7Revision };
+}
 function writeEmergencyMirror(snapshot){
   if(!canUseLocalStorage) return false;
   const current = parseStoredSnapshot(safeLocalGet(EMERGENCY_STATE_KEY));
   if(current && current.clean.revision > snapshot.revision) return true;
-  return safeLocalSet(EMERGENCY_STATE_KEY, JSON.stringify(snapshot));
+  return safeLocalSet(EMERGENCY_STATE_KEY, JSON.stringify(snapshotForStorage(snapshot)));
 }
 function writeFallbackState(snapshot, expectedRevision){
   const current = parseStoredSnapshot(safeLocalGet(FALLBACK_STATE_KEY));
   if(current && current.clean.revision > expectedRevision){
     return { status:'conflict', latest:current.raw };
   }
-  if(current && !valuesEqual(current.raw, snapshot)){
+  const stored = snapshotForStorage(snapshot);
+  if(current && !valuesEqual(current.raw, stored)){
     safeLocalSet(FALLBACK_PREVIOUS_KEY, JSON.stringify(current.raw));
   }
-  if(!safeLocalSet(FALLBACK_STATE_KEY, JSON.stringify(snapshot))){
+  if(!safeLocalSet(FALLBACK_STATE_KEY, JSON.stringify(stored))){
     throw new Error('Local storage write failed');
   }
   writeEmergencyMirror(snapshot);
@@ -1234,11 +1325,18 @@ function mirrorDurableSnapshot(snapshot){
   if(!canUseLocalStorage) return;
   const current = parseStoredSnapshot(safeLocalGet(FALLBACK_STATE_KEY));
   if(current && current.clean.revision > snapshot.revision) return;
-  if(current && !valuesEqual(current.raw, snapshot)){
+  const stored = snapshotForStorage(snapshot);
+  if(current && !valuesEqual(current.raw, stored)){
     safeLocalSet(FALLBACK_PREVIOUS_KEY, JSON.stringify(current.raw));
   }
-  safeLocalSet(FALLBACK_STATE_KEY, JSON.stringify(snapshot));
+  safeLocalSet(FALLBACK_STATE_KEY, JSON.stringify(stored));
   writeEmergencyMirror(snapshot);
+  if(pendingV7MigrationBase?.revision === migratedV7Revision){
+    const checkpoint = parseStoredSnapshot(safeLocalGet(V7_MIGRATION_BASE_FALLBACK_KEY));
+    if(!checkpoint || checkpoint.clean.revision < migratedV7Revision){
+      safeLocalSet(V7_MIGRATION_BASE_FALLBACK_KEY, JSON.stringify(pendingV7MigrationBase));
+    }
+  }
 }
 async function withPersistenceLock(callback){
   if(navigator.locks && navigator.locks.request){
@@ -1280,8 +1378,14 @@ async function mergeWriteConflict(latestRaw){
     localSnapshot = buildSnapshot();
     if(!await saveRecoverySnapshot('concurrent-local-copy', localSnapshot)) throw new Error('RECOVERY_SAVE_FAILED');
   } while(stateRevision !== localSnapshot.revision);
-  const merged = mergeConcurrentSnapshots(durableBaseSnapshot, localSnapshot, remoteSnapshot);
+  const merged = pendingV7MigrationBase
+    ? mergeConcurrentSnapshots(durableBaseSnapshot, remoteSnapshot, localSnapshot)
+    : mergeConcurrentSnapshots(durableBaseSnapshot, localSnapshot, remoteSnapshot);
   const mergedClean = validateBackupObject(merged.snapshot, false);
+  const remoteV7Revision = storedV7Revision(latestRaw);
+  if(remoteV7Revision !== null && (migratedV7Revision === null || remoteV7Revision > migratedV7Revision)){
+    migratedV7Revision = remoteV7Revision;
+  }
   applyValidatedState(mergedClean);
   durableRevision = remoteClean.revision;
   durableBaseSnapshot = cloneJson(remoteSnapshot);
@@ -1292,7 +1396,9 @@ async function mergeWriteConflict(latestRaw){
 
   showStorageBanner(
     merged.hadDirectConflict
-      ? 'Two open copies changed the same item. Tally kept your local edit, preserved the other state as a recovery copy, and merged everything else. Review recent activity and save a backup.'
+      ? (pendingV7MigrationBase
+        ? 'Tally recovered changes from the older app and kept newer edits from another open copy where they conflicted.'
+        : 'Two open copies changed the same item. Tally kept your local edit, preserved the other state as a recovery copy, and merged everything else. Review recent activity and save a backup.')
       : 'Changes from another open copy were merged safely.',
     merged.hadDirectConflict
   );
@@ -1435,12 +1541,14 @@ async function requestPersistentStorage(){
   updateStorageStatus();
 }
 
-function parseCandidate(raw, source, candidates, problems){
+function parseCandidate(raw, source, candidates, problems, afterRevision = null){
   if(!raw) return;
   try{
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if(afterRevision !== null && (parsed?.schemaVersion !== 7 || parsed.revision <= afterRevision)) return;
     const clean = validateBackupObject(parsed, false);
     candidates.push({
+      raw:parsed,
       clean,
       source,
       schemaVersion:Number.isInteger(parsed?.schemaVersion) ? parsed.schemaVersion : 1
@@ -1450,18 +1558,38 @@ function parseCandidate(raw, source, candidates, problems){
   }
 }
 
-async function readDatabaseCopies(sources, candidates, problems){
+async function readDatabaseCopies(sources, candidates, problems, afterRevision){
   if(!tallyDb) return;
   for(const [key, source] of sources){
-    try{ parseCandidate(await idbGet(key), source, candidates, problems); }
+    try{ parseCandidate(await idbGet(key), source, candidates, problems, afterRevision); }
     catch(e){ problems.push(`${source}: ${e.message}`); }
   }
 }
 
-function readLocalCopies(sources, candidates, problems){
+function readLocalCopies(sources, candidates, problems, afterRevision){
   for(const [key, source] of sources){
-    parseCandidate(safeLocalGet(key), source, candidates, problems);
+    parseCandidate(safeLocalGet(key), source, candidates, problems, afterRevision);
   }
+}
+
+async function readCurrentCopies(candidates, problems){
+  await readDatabaseCopies([
+    [STATE_KEY, 'on-device database'],
+    [PREVIOUS_STATE_KEY, 'previous database copy'],
+    [RECOVERY_KEY, 'database recovery copy']
+  ], candidates, problems);
+  readLocalCopies([
+    [EMERGENCY_STATE_KEY, 'emergency copy'],
+    [FALLBACK_STATE_KEY, 'browser storage copy'],
+    [FALLBACK_PREVIOUS_KEY, 'previous browser storage copy'],
+    [RECOVERY_STATE_KEY, 'browser recovery copy']
+  ], candidates, problems);
+}
+
+async function readV7Head(copies, problems, checkpoint){
+  await readDatabaseCopies(V7_DB_SNAPSHOTS.slice(0,1), copies, problems, checkpoint);
+  readLocalCopies(V7_LOCAL_SNAPSHOTS.slice(0,2), copies, problems, checkpoint);
+  return copies.sort((a,b) => b.clean.revision - a.clean.revision).find(copy => copy.schemaVersion === 7);
 }
 
 function readOriginalLedger(candidates, problems){
@@ -1488,6 +1616,69 @@ function readOriginalLedger(candidates, problems){
   }
 }
 
+async function recoverV7Changes(head, v7Copies, currentCopies, problems, requireBase = false){
+  if(!head || (migratedV7Revision !== null && head.clean.revision <= migratedV7Revision)) return;
+
+  await readDatabaseCopies(V7_DB_SNAPSHOTS.slice(1), v7Copies, problems);
+  readLocalCopies(V7_LOCAL_SNAPSHOTS.slice(2), v7Copies, problems);
+  v7Copies = v7Copies.filter(copy => copy.schemaVersion === 7);
+
+  let remote = snapshotFromClean(head.clean);
+  let base = null;
+  if(migratedV7Revision !== null){
+    const checkpoints = [parseStoredSnapshot(safeLocalGet(V7_MIGRATION_BASE_FALLBACK_KEY))];
+    try{ if(tallyDb) checkpoints.unshift(parseStoredSnapshot(await idbGet(V7_MIGRATION_BASE_KEY))); }catch(e){}
+    const previous = [...checkpoints, ...v7Copies].find(copy =>
+      copy?.raw.schemaVersion === 7 && copy.clean.revision === migratedV7Revision);
+    if(previous) base = snapshotFromClean(previous.clean);
+  }else{
+    // Earlier v8 builds did not record the migration. A matching saved revision
+    // can still establish the common ledger if both copies are available.
+    for(const copy of currentCopies){
+      const previous = v7Copies.find(candidate => candidate.clean.revision === copy.clean.revision);
+      if(!previous) continue;
+      const v8 = snapshotFromClean(copy.clean);
+      v8.data.travelPauses = [];
+      const v7 = snapshotFromClean(previous.clean);
+      if(snapshotContentEqual(v8, v7)){
+        base = v7;
+        break;
+      }
+    }
+  }
+  if(requireBase && !base) throw new Error('V7_MIGRATION_BASE_MISSING');
+
+  const current = buildSnapshot();
+  if(!base){
+    // Keep the current versions of records when the shared history is missing.
+    // Previous v8 copies also identify records that were already removed in v8.
+    const data = {};
+    for(const [key, items] of Object.entries(remote.data)){
+      const knownIds = new Set(current.data[key].map(item => item.id));
+      for(const copy of currentCopies){
+        for(const item of copy.clean[key]) knownIds.add(item.id);
+      }
+      data[key] = items.filter(item => !knownIds.has(item.id));
+    }
+    remote = { ...remote, data, settings:current.settings };
+    base = cloudMergeBase(current);
+  }
+
+  const { snapshot, hadDirectConflict } = mergeConcurrentSnapshots(base, current, remote);
+  const clean = validateBackupObject(snapshot, false);
+  migratedV7Revision = head.clean.revision;
+  pendingV7MigrationBase = head.raw;
+  try{
+    applyValidatedState(clean);
+    await persistData();
+  }finally{
+    pendingV7MigrationBase = null;
+  }
+  if(hadDirectConflict && !persistFailed){
+    showStorageBanner('Tally recovered changes from the older app. Where both versions edited the same record, Tally kept the current edit.', true);
+  }
+}
+
 async function loadAll(){
   const candidates = [];
   const problems = [];
@@ -1505,18 +1696,22 @@ async function loadAll(){
 
     if(!await verifyCloudAccess()) return;
 
-    await readDatabaseCopies([
-      [STATE_KEY, 'on-device database'],
-      [PREVIOUS_STATE_KEY, 'previous database copy'],
-      [RECOVERY_KEY, 'database recovery copy']
-    ], candidates, problems);
-    readLocalCopies([
-      [EMERGENCY_STATE_KEY, 'emergency copy'],
-      [FALLBACK_STATE_KEY, 'browser storage copy'],
-      [FALLBACK_PREVIOUS_KEY, 'previous browser storage copy'],
-      [RECOVERY_STATE_KEY, 'browser recovery copy']
-    ], candidates, problems);
+    await readCurrentCopies(candidates, problems);
 
+    const v7Copies = [];
+    let v7Head;
+    if(candidates.length){
+      candidates.sort((a,b) => b.clean.revision - a.clean.revision);
+      const checkpoint = storedV7Revision(candidates[0].raw);
+      v7Head = await readV7Head(v7Copies, problems, checkpoint);
+    }else{
+      await readDatabaseCopies(V7_DB_SNAPSHOTS, v7Copies, problems);
+      readLocalCopies(V7_LOCAL_SNAPSHOTS, v7Copies, problems);
+      if(v7Copies.length){
+        candidates.push(...v7Copies);
+        await migrateLegacyCloudBase('cloud-base-v7', 'tally-cloud-base-v7');
+      }
+    }
     if(!candidates.length){
       await readDatabaseCopies(LEGACY_DB_SNAPSHOTS, candidates, problems);
       readLocalCopies(LEGACY_LOCAL_SNAPSHOTS, candidates, problems);
@@ -1526,26 +1721,35 @@ async function loadAll(){
 
     if(candidates.length){
       candidates.sort((a,b) => b.clean.revision - a.clean.revision);
-      applyValidatedState(candidates[0].clean);
+      const chosen = candidates[0];
+      if(chosen.schemaVersion === 7){
+        migratedV7Revision = chosen.clean.revision;
+        pendingV7MigrationBase = chosen.raw;
+      }else migratedV7Revision = storedV7Revision(chosen.raw);
+      applyValidatedState(chosen.clean);
       let loadedSnapshot = buildSnapshot();
       let result;
-      if(tallyDb && (candidates[0].source !== 'on-device database' || candidates[0].schemaVersion !== SCHEMA_VERSION)){
+      if(tallyDb && (chosen.source !== 'on-device database' || chosen.schemaVersion !== SCHEMA_VERSION)){
         result = await idbWriteState(loadedSnapshot, loadedSnapshot.revision, true);
       }
       if(!tallyDb && canUseLocalStorage){
         result = writeFallbackState(loadedSnapshot, loadedSnapshot.revision);
       }
       if(result?.status === 'conflict'){
+        migratedV7Revision = storedV7Revision(result.latest);
         applyValidatedState(validateBackupObject(result.latest, false));
         loadedSnapshot = buildSnapshot();
       }
       durableRevision = stateRevision;
       durableBaseSnapshot = cloneJson(loadedSnapshot);
       mirrorDurableSnapshot(loadedSnapshot);
+      pendingV7MigrationBase = null;
     } else {
       durableRevision = stateRevision;
       durableBaseSnapshot = cloneJson(buildSnapshot());
     }
+
+    await recoverV7Changes(v7Head, v7Copies, candidates.filter(copy => copy.schemaVersion === SCHEMA_VERSION), problems);
 
     if(problems.length && !candidates.length){
       unreadableLocalState = true;
@@ -1625,6 +1829,7 @@ async function refreshDurableState(){
     const latest = fallbackCopy && (!databaseCopy || fallbackCopy.clean.revision > databaseCopy.clean.revision)
       ? fallbackCopy : databaseCopy;
     if(latest && latest.clean.revision > durableRevision){
+      migratedV7Revision = storedV7Revision(latest.raw);
       applyValidatedState(latest.clean);
       durableRevision = latest.clean.revision;
       durableBaseSnapshot = buildSnapshot();
@@ -1730,7 +1935,7 @@ function cloudMergeBase(reference){
     schemaVersion:SCHEMA_VERSION,
     revision:0,
     writerId:null,
-    data:{ taskSections:[], habits:[], bonusTasks:[], dailyBonuses:[], milestones:[], completedDays:[], entries:[] },
+    data:{ taskSections:[], habits:[], bonusTasks:[], dailyBonuses:[], milestones:[], travelPauses:[], completedDays:[], entries:[] },
     settings:cloneJson(reference.settings)
   };
 }
@@ -1762,9 +1967,9 @@ function readCloudBaseRecord(){
   return newestCloudBaseRecord(CLOUD_BASE_KEY, CLOUD_BASE_FALLBACK_KEY);
 }
 
-async function migrateLegacyCloudBase(){
+async function migrateLegacyCloudBase(dbKey = LEGACY_CLOUD_BASE_KEY, localKey = LEGACY_CLOUD_BASE_FALLBACK_KEY){
   try{
-    const record = await newestCloudBaseRecord(LEGACY_CLOUD_BASE_KEY, LEGACY_CLOUD_BASE_FALLBACK_KEY);
+    const record = await newestCloudBaseRecord(dbKey, localKey);
     if(!record) return;
     if(tallyDb){
       await idbPut(CLOUD_BASE_KEY, record, current => current === undefined);
@@ -1981,6 +2186,7 @@ function clearTallyLocalStorage(){
   const keys = [
     FALLBACK_STATE_KEY, FALLBACK_PREVIOUS_KEY, EMERGENCY_STATE_KEY,
     RECOVERY_STATE_KEY, CLOUD_BASE_FALLBACK_KEY, TRUSTED_DEVICE_FALLBACK_KEY,
+    ...V7_LOCAL_SNAPSHOTS.map(([key]) => key), 'tally-cloud-base-v7', V7_MIGRATION_BASE_FALLBACK_KEY,
     ...LEGACY_LOCAL_SNAPSHOTS.map(([key]) => key), LEGACY_CLOUD_BASE_FALLBACK_KEY,
     'tally-data', 'tally-settings'
   ];
@@ -2028,6 +2234,17 @@ async function signOutAndClearDevice(){
   loading.style.display = 'flex';
   try{
     if(syncChannel) syncChannel.postMessage({ type:'prepare-clear-device', writerId:CLIENT_ID });
+    if(cloudSyncInFlight) await cloudSyncInFlight;
+    await refreshDurableState();
+    const v7Copies = [];
+    const problems = [];
+    const head = await readV7Head(v7Copies, problems, migratedV7Revision);
+    if(problems.length) throw new Error('V7_STATE_UNREADABLE');
+    if(head){
+      const currentCopies = [];
+      await readCurrentCopies(currentCopies, problems);
+      await recoverV7Changes(head, v7Copies, currentCopies.filter(copy => copy.schemaVersion === SCHEMA_VERSION), problems, true);
+    }
     if(!await syncCloudNow()) throw new Error('SYNC_NOT_CONFIRMED');
     const response = await fetchWithTimeout('/api/auth/sign-out', {
       method:'POST',
@@ -2040,7 +2257,9 @@ async function signOutAndClearDevice(){
 
     await withPersistenceLock(async () => {
       await refreshDurableState();
-      if(!snapshotContentEqual(durableBaseSnapshot, cloudBaseSnapshot)){
+      const lateProblems = [];
+      const lateV7Head = await readV7Head([], lateProblems, migratedV7Revision);
+      if(lateV7Head || lateProblems.length || !snapshotContentEqual(durableBaseSnapshot, cloudBaseSnapshot)){
         throw new Error('LOCAL_STATE_CHANGED_AFTER_SYNC');
       }
       closeDeviceDatabase();
@@ -2229,7 +2448,7 @@ function recomputeHabitStreak(habit){
   const end = todayKey();
   const dates = new Set(
     entries
-      .filter(e => e.type === 'good' && e.date >= start && e.date <= end && (
+      .filter(e => e.type === 'good' && e.date >= start && e.date <= end && !pauseOn(e.date) && (
         e.habitId
           ? e.habitId === habit.id
           : (sameNameGoodHabits.length === 1 && e.name === habit.name)
@@ -2706,7 +2925,7 @@ function markBackupCompleted(exportedAt){
 }
 
 function hasAnyLedgerData(){
-  return entries.length || habits.length || bonusTasks.length || dailyBonuses.length || taskSections.length || milestones.length || completedDays.length;
+  return travelPauses.length || entries.length || habits.length || bonusTasks.length || dailyBonuses.length || taskSections.length || milestones.length || completedDays.length;
 }
 function describeDaysSince(iso){
   const ms = new Date(iso).getTime();
@@ -2745,6 +2964,7 @@ function dismissReminder(){
 // the destructive-action confirmations so nothing is cleared blind.
 function ledgerCountsSentence(){
   const parts = [
+    `${travelPauses.length} travel pauses`,
     `${taskSections.length} topic/bonus section${taskSections.length === 1 ? '' : 's'}`,
     `${habits.length} habit${habits.length === 1 ? '' : 's'}`,
     `${bonusTasks.length} bonus entr${bonusTasks.length === 1 ? 'y' : 'ies'}`,
@@ -2799,7 +3019,7 @@ function setBackupStatus(message, tone){
   el.className = `status-message${tone ? ` ${tone}` : ''}`;
 }
 function backupContentsLabel(clean){
-  return `${clean.taskSections.length} topic/bonus section${clean.taskSections.length === 1 ? '' : 's'}, ${clean.habits.length} habit${clean.habits.length === 1 ? '' : 's'}, ${clean.bonusTasks.length} bonus entr${clean.bonusTasks.length === 1 ? 'y' : 'ies'}, ${clean.dailyBonuses.length} automatic daily bonus${clean.dailyBonuses.length === 1 ? '' : 'es'}, ${clean.milestones.length} milestone${clean.milestones.length === 1 ? '' : 's'}, ${clean.completedDays.length} completed day${clean.completedDays.length === 1 ? '' : 's'}, and ${clean.entries.length} logged entr${clean.entries.length === 1 ? 'y' : 'ies'}`;
+  return `${clean.travelPauses.length} travel pauses, ${clean.taskSections.length} topic/bonus section${clean.taskSections.length === 1 ? '' : 's'}, ${clean.habits.length} habit${clean.habits.length === 1 ? '' : 's'}, ${clean.bonusTasks.length} bonus entr${clean.bonusTasks.length === 1 ? 'y' : 'ies'}, ${clean.dailyBonuses.length} automatic daily bonus${clean.dailyBonuses.length === 1 ? '' : 'es'}, ${clean.milestones.length} milestone${clean.milestones.length === 1 ? '' : 's'}, ${clean.completedDays.length} completed day${clean.completedDays.length === 1 ? '' : 's'}, and ${clean.entries.length} logged entr${clean.entries.length === 1 ? 'y' : 'ies'}`;
 }
 function triggerFileDownload(file){
   const url = URL.createObjectURL(file);
@@ -2863,7 +3083,7 @@ function csvCell(value, protectFormula){
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-const FULL_CSV_BACKUP_VERSION = '7';
+const FULL_CSV_BACKUP_VERSION = '8';
 const FULL_CSV_V1_HEADERS = [
   'format_version','record_type','revision','writer_id','id','name_json','type',
   'points','streak','last_date','ledger_date','timestamp_ms','habit_id','bonus_id',
@@ -2945,6 +3165,9 @@ function buildFullCsvBackup(){
       points:milestone.points,
       threshold_days:milestone.days,
       description_json:JSON.stringify(milestone.description || '')
+    })),
+    ...snapshot.data.travelPauses.map(pause => fullCsvRow({
+      record_type:'travel_pause', id:pause.id, ledger_date:pause.start, last_date:pause.end
     })),
     ...snapshot.data.completedDays.map(day => fullCsvRow({
       record_type:'completed_day',
@@ -3092,7 +3315,7 @@ function parseFullCsvBackup(raw){
   const meta = metaRows[0];
   assertCsvFields(meta.values, ['format_version','record_type','revision','writer_id','exported_at'], meta.rowNumber, headers);
   const expectedVersion = headers === FULL_CSV_HEADERS
-    ? (meta.values.format_version === '6' ? '6' : FULL_CSV_BACKUP_VERSION)
+    ? (['6','7'].includes(meta.values.format_version) ? meta.values.format_version : FULL_CSV_BACKUP_VERSION)
     : (headers === FULL_CSV_V5_HEADERS
       ? '5'
       : (headers === FULL_CSV_V4_HEADERS
@@ -3126,6 +3349,7 @@ function parseFullCsvBackup(raw){
   const restoredDailyBonuses = [];
   const restoredTaskSections = [];
   const restoredMilestones = [];
+  const restoredPauses = [];
   const restoredCompletedDays = [];
   const restoredEntries = [];
   for(const record of records){
@@ -3183,8 +3407,11 @@ function parseFullCsvBackup(raw){
       if(value.habit_id) entry.habitId = value.habit_id;
       if(value.bonus_id) entry.bonusId = value.bonus_id;
       restoredEntries.push(entry);
+    }else if(value.record_type === 'travel_pause' && expectedVersion === '8'){
+      assertCsvFields(value, ['record_type','id','ledger_date','last_date'], record.rowNumber, headers);
+      restoredPauses.push({ id:value.id, start:value.ledger_date, end:value.last_date || null });
     }else if(value.record_type === 'daily_bonus'){
-      if(expectedVersion !== '7') throw new Error(`Row ${record.rowNumber} has an unsupported record type.`);
+      if(Number(expectedVersion) < 7) throw new Error(`Row ${record.rowNumber} has an unsupported record type.`);
       assertCsvFields(value, ['record_type','id','name_json','points','description_json'], record.rowNumber, headers);
       restoredDailyBonuses.push({
         id:value.id,
@@ -3228,6 +3455,7 @@ function parseFullCsvBackup(raw){
       bonusTasks,
       dailyBonuses:restoredDailyBonuses,
       milestones:restoredMilestones,
+      travelPauses:restoredPauses,
       completedDays:restoredCompletedDays,
       entries:restoredEntries
     },
@@ -3286,7 +3514,7 @@ function buildActivityCsv(){
       entry.name,
       entry.type,
       Number(entry.points) || 0,
-      isInStatsWindow(entry.date) ? 'true' : 'false',
+      isInStatsWindow(entry.date) && !pauseOn(entry.date) ? 'true' : 'false',
       entry.dailyBonusId ? 'automatic_daily_bonus' : (entry.derived ? 'automatic_milestone' : 'manual'),
       entry.id,
       entry.habitId || '',
@@ -3309,6 +3537,7 @@ function downloadCsv(){
 function closeBackup(){
   closeDialog('backupOverlay');
   setBackupStatus('');
+  document.getElementById('csvRestoreFileInput').value = '';
   pendingCsvBackupText = null;
   setCsvButtonsDisabled(true);
 }
@@ -3383,6 +3612,7 @@ function mergeAddCounts(clean){
     bonusTasks: countNewById(bonusTasks, clean.bonusTasks),
     dailyBonuses: countNewById(dailyBonuses, clean.dailyBonuses),
     milestones: countNewById(milestones, clean.milestones),
+    travelPauses: countNewById(travelPauses, clean.travelPauses),
     completedDays: countNewById(completedDays, clean.completedDays),
     entries: countNewById(entries, clean.entries)
   };
@@ -3401,6 +3631,7 @@ function mergeImportedState(clean){
       bonusTasks:unionById(bonusTasks, clean.bonusTasks),
       dailyBonuses:unionById(dailyBonuses, clean.dailyBonuses),
       milestones:unionById(milestones, clean.milestones),
+      travelPauses:unionById(travelPauses, clean.travelPauses),
       completedDays:unionById(completedDays, clean.completedDays),
       entries:unionById(entries, clean.entries)
     },
@@ -3416,12 +3647,13 @@ function mergeImportedState(clean){
 async function mergeValidatedBackup(clean, formatLabel){
   const label = formatLabel || 'backup';
   const adds = mergeAddCounts(clean);
-  const total = adds.entries + adds.habits + adds.bonusTasks + adds.dailyBonuses + adds.taskSections + adds.milestones + adds.completedDays;
+  const total = adds.travelPauses + adds.entries + adds.habits + adds.bonusTasks + adds.dailyBonuses + adds.taskSections + adds.milestones + adds.completedDays;
   if(total === 0){
     setBackupStatus(`Nothing to merge — every item in that ${label} is already in your ledger.`, 'success');
     return;
   }
   const parts = [
+    `${adds.travelPauses} travel pauses`,
     `${adds.entries} logged entr${adds.entries === 1 ? 'y' : 'ies'}`,
     `${adds.taskSections} topic/bonus section${adds.taskSections === 1 ? '' : 's'}`,
     `${adds.habits} habit${adds.habits === 1 ? '' : 's'}`,
@@ -3491,6 +3723,7 @@ async function clearLedgerData(){
       showSaveWarning();
       return;
     }
+    setTravelPauses([]);
     habits = []; bonusTasks = []; dailyBonuses = []; taskSections = []; milestones = []; completedDays = []; entries = [];
     await persistData();
     renderAll();
@@ -3561,6 +3794,7 @@ function returnToToday(){
 function renderAll(didLog){
   scheduleNextDayRefresh();
   const ledger = summarizeLedger();
+  if(document.getElementById('travelOverlay')?.classList.contains('show')) renderTravelList();
   renderTodayNavigator();
   renderHeader(didLog, ledger);
   renderCompletionControl(activeLedgerDate(), 'todayCompletionControl');
@@ -3591,9 +3825,86 @@ function activityEntriesForDate(date, ledger, manualEntries = entries.filter(ent
   ];
 }
 
+function renderTravelList(){
+  const list = document.getElementById('travelList');
+  if(!list) return;
+  const today = todayKey();
+  list.innerHTML = travelPauses.slice().sort((a,b) => b.start.localeCompare(a.start)).map(pause => {
+    const active = pause.start <= today && (!pause.end || today <= pause.end);
+    return `<div class="row"><span class="row-main">${pause.start} – ${pause.end || 'until resumed'}${active ? ' · Active' : ''}</span>
+      <button type="button" class="add-link" data-action="edit-travel" data-id="${escapeHtml(pause.id)}">Edit</button></div>`;
+  }).join('') + (travelPauses.length ? '<button type="button" class="add-link" data-action="new-travel">New pause</button>' : '') +
+    (pauseOn(today) ? ' <button type="button" class="completion-button" data-action="resume-travel">Resume today</button>' : '');
+}
+function editTravelPause(id, date = todayKey()){
+  const pause = travelPauses.find(p => p.id === id);
+  editingPause = pause ? { ...pause } : null;
+  document.getElementById('travelStart').value = pause?.start || date;
+  document.getElementById('travelEnd').value = pause?.end || '';
+  document.getElementById('removeTravel').hidden = !pause;
+  document.getElementById('saveTravel').textContent = pause ? 'Save changes' : 'Add pause';
+  clearFieldError('travelError');
+}
+function openTravel(date){
+  if(!document.getElementById('travelOverlay')) return;
+  const pause = travelPauses.find(p => p.start <= date && (!p.end || p.end >= date));
+  renderTravelList();
+  editTravelPause(pause?.id, date);
+  openDialog('travelOverlay', 'travelStart');
+}
+function applyTravelEdit(pauses){
+  setTravelPauses(pauses);
+  recomputeAllHabitStreaks();
+  persistData();
+  closeDialog('travelOverlay');
+  renderAll();
+}
+function saveTravelPause(){
+  let start = document.getElementById('travelStart').value;
+  const endInput = document.getElementById('travelEnd');
+  if(endInput.validity.badInput) return showFieldError('travelError','Enter a complete end date or clear the field.','travelEnd');
+  let end = endInput.value || null;
+  if(!isValidDateKey(start)) return showFieldError('travelError','Choose the first paused day.','travelStart');
+  if(end && (!isValidDateKey(end) || end < start)) return showFieldError('travelError','Choose an end date on or after the first paused day.','travelEnd');
+  const previous = travelPauses.find(p => p.id === editingPause?.id);
+  if(editingPause){
+    if(!previous) return showFieldError('travelError','This pause was removed. Choose New pause to add it again.');
+    const dates = mergeTravelPauseDates(editingPause, { start, end }, previous);
+    if(!dates){
+      return showFieldError('travelError','This pause changed elsewhere. Open it again to review the latest dates.');
+    }
+    ({ start, end } = dates);
+  }
+  const others = travelPauses.filter(p => p.id !== editingPause?.id);
+  const lastDate = end || '9999-12-31';
+  if(others.some(p => {
+    const overlapStart = laterDateKey(p.start, start);
+    const overlapEnd = p.end && p.end < lastDate ? p.end : lastDate;
+    return overlapStart <= overlapEnd &&
+      (!previous || overlapStart < previous.start || (previous.end && overlapEnd > previous.end));
+  })){
+    return showFieldError('travelError','These dates add an overlap with another pause. Choose different dates.');
+  }
+  if(!editingPause && !canAddRecord('travelPauses', travelPauses, 'travelError')) return;
+  applyTravelEdit([...others, { id:editingPause?.id || uid(), start, end }]);
+}
+function resumeTravelToday(){
+  const today = todayKey();
+  const yesterday = addDaysToKey(today, -1);
+  applyTravelEdit(travelPauses.filter(p => p.start !== today).map(p =>
+    p.start < today && (!p.end || p.end >= today) ? { ...p, end:yesterday } : p));
+}
 function renderCompletionControl(date, elementId){
   const el = document.getElementById(elementId);
   if(!el) return;
+  if(pauseOn(date)){
+    const editButton = document.getElementById('travelOverlay')
+      ? `<button type="button" class="completion-button" data-action="open-travel" data-date="${date}">Edit pause</button>`
+      : '';
+    el.innerHTML = `<div class="completion-card"><span class="completion-copy"><span class="completion-title">Paused · Travel mode</span>
+      <span class="completion-sub">Entries are saved. Points and streaks skip this day.</span></span>${editButton}</div>`;
+    return;
+  }
   const explicit = explicitCompletionForDate(date);
   const hasActivity = dayHasManualActivity(date);
   if(explicit){
@@ -3659,10 +3970,11 @@ function renderHeader(didLog, ledger = summarizeLedger()){
   const statusEl = document.getElementById('statusEl');
   const tone = net > 0 ? 'gain' : net < 0 ? 'loss' : 'even';
 
-  scoreEl.textContent = score;
+  const paused = !!pauseOn(shownDate);
+  scoreEl.textContent = paused ? '—' : score;
   scoreEl.className = 'score tabular mono ' + tone;
   const periodLabel = shownDate === todayKey() ? 'today' : 'on this day';
-  statusEl.textContent = net > 0 ? `▲ +${net} ${periodLabel}` : net < 0 ? `▼ ${net} ${periodLabel}` : `— even ${periodLabel}`;
+  statusEl.textContent = paused ? 'Travel mode' : net > 0 ? `▲ +${net} ${periodLabel}` : net < 0 ? `▼ ${net} ${periodLabel}` : `— even ${periodLabel}`;
   statusEl.className = 'status-label ' + tone;
 
   document.getElementById('allTimeEl').textContent = (allTime > 0 ? '+' : '') + allTime;
@@ -3670,7 +3982,7 @@ function renderHeader(didLog, ledger = summarizeLedger()){
   const successEl = document.getElementById('successTagEl');
   const dayTracked = isDayTracked(shownDate);
   if(!dayTracked){
-    successEl.textContent = 'Untracked · log activity or mark complete';
+    successEl.textContent = paused ? 'Paused · streak held' : 'Untracked · log activity or mark complete';
     successEl.className = 'success-tag';
   }else if(qualifyingScore >= successThreshold){
     successEl.textContent = `✓ Success day (≥${successThreshold})`;
@@ -3679,7 +3991,7 @@ function renderHeader(didLog, ledger = summarizeLedger()){
     successEl.textContent = `${successThreshold - qualifyingScore} to go for a success day`;
     successEl.className = 'success-tag';
   }
-  const progress = successThreshold <= 0 ? 100 : Math.max(0, Math.min(100, Math.round((qualifyingScore / successThreshold) * 100)));
+  const progress = paused ? 0 : successThreshold <= 0 ? 100 : Math.max(0, Math.min(100, Math.round((qualifyingScore / successThreshold) * 100)));
   document.getElementById('thresholdProgressEl').style.width = `${progress}%`;
 
   if(didLog){
@@ -3874,7 +4186,7 @@ function historyDaysForRange(){
 
 function averageScoreWindow(dayCount, byDate, end = todayKey(), dates = trackedDateKeys(end)){
   const start = laterDateKey(statsStartKey(), addDaysToKey(end, -(dayCount - 1)));
-  const calendarDays = calendarDaysInclusive(start, end);
+  const calendarDays = countingDaysBetween(start, end);
   const tracked = dates.filter(date => date >= start);
   if(tracked.length === 0) return { average:null, tracked:0, calendarDays };
   const total = tracked.reduce((sum, date) => sum + dailyBase + (byDate[date] || 0), 0);
@@ -3909,6 +4221,77 @@ function chartStepForDeviation(maxDeviation){
   const normalized = target / magnitude;
   const factor = [1,2,2.5,3,5,10].find(x => x >= normalized) || 10;
   return factor * magnitude;
+}
+
+function bindChartPreview(svg, days, showDay, restoreSelection){
+  const plot = svg.querySelector('.chart-plot');
+  let press = null;
+  let suppressClick = false;
+
+  function dayAt(event){
+    // The SVG can be letterboxed. Measure the plot itself in screen coordinates.
+    const bounds = plot.getBoundingClientRect();
+    if(!bounds.width || event.clientX < bounds.left || event.clientX > bounds.right ||
+       event.clientY < bounds.top || event.clientY > bounds.bottom) return null;
+    return Math.round((event.clientX - bounds.left) / bounds.width * (days.length - 1));
+  }
+
+  svg.addEventListener('pointerdown', event => {
+    if(event.isPrimary === false || event.button !== 0) return;
+    suppressClick = false;
+    if(event.pointerType === 'mouse') return;
+    const hitDate = event.target.closest('[data-action="open-day"]')?.dataset.date;
+    const index = hitDate ? days.indexOf(hitDate) : dayAt(event);
+    if(index === null || index < 0) return;
+    const hold = { id:event.pointerId, x:event.clientX, y:event.clientY, active:false };
+    press = hold;
+    hold.timer = setTimeout(() => {
+      if(!svg.isConnected || press !== hold) return;
+      hold.active = true;
+      suppressClick = true;
+      svg.setPointerCapture(event.pointerId);
+      showDay(index);
+    }, 350);
+  });
+  svg.addEventListener('pointermove', event => {
+    if(event.isPrimary === false) return;
+    if(event.pointerType !== 'mouse'){
+      if(!press || press.id !== event.pointerId) return;
+      if(!press.active){
+        if(Math.hypot(event.clientX - press.x, event.clientY - press.y) > 8){
+          clearTimeout(press.timer);
+          suppressClick = true;
+        }
+        return;
+      }
+    }
+    const index = dayAt(event);
+    if(index === null) restoreSelection();
+    else showDay(index);
+  });
+  function finishPress(event){
+    if(!press || press.id !== event.pointerId) return;
+    clearTimeout(press.timer);
+    press = null;
+    restoreSelection();
+  }
+  svg.addEventListener('pointerup', finishPress);
+  svg.addEventListener('pointercancel', finishPress);
+  svg.addEventListener('lostpointercapture', event => {
+    if(!svg.hasPointerCapture(event.pointerId)) finishPress(event);
+  });
+  svg.addEventListener('pointerleave', event => {
+    if(event.pointerType === 'mouse') restoreSelection();
+  });
+  svg.addEventListener('contextmenu', event => {
+    if(press) event.preventDefault();
+  });
+  svg.addEventListener('click', event => {
+    if(suppressClick && event.detail !== 0){
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  });
 }
 
 function renderHistory(ledger = summarizeLedger()){
@@ -3968,7 +4351,8 @@ function renderHistory(ledger = summarizeLedger()){
     let crossedUnknown = false;
     values.forEach((value, i) => {
       if(value === null){
-        if(previousObservedIndex !== null) crossedUnknown = true;
+        if(pauseOn(days[i])) previousObservedIndex = null;
+        else if(previousObservedIndex !== null) crossedUnknown = true;
         return;
       }
       if(previousObservedIndex !== null && crossedUnknown){
@@ -3982,6 +4366,15 @@ function renderHistory(ledger = summarizeLedger()){
     });
     return segments.join(' ');
   };
+  const firstDay = days[0], lastDay = days[days.length - 1];
+  const halfDayWidth = plotW / Math.max(1, days.length - 1) / 2;
+  const pauseBands = pauseIntervals.filter(range => range.start <= lastDay && range.end >= firstDay).map(range => {
+    const start = laterDateKey(range.start, firstDay);
+    const end = range.end < lastDay ? range.end : lastDay;
+    const x = Math.max(left, xFor(calendarDaysInclusive(firstDay, start) - 1) - halfDayWidth);
+    const edge = Math.min(left + plotW, xFor(calendarDaysInclusive(firstDay, end) - 1) + halfDayWidth);
+    return `<rect class="chart-paused" x="${x}" y="${top}" width="${edge - x}" height="${plotH}"></rect>`;
+  }).join('');
   const scoreGapPath = pathAcrossUnknownGaps(scores);
   const averageGapPath = showAverage ? pathAcrossUnknownGaps(rolling) : '';
 
@@ -4003,44 +4396,76 @@ function renderHistory(ledger = summarizeLedger()){
     return `<text class="chart-axis-label" x="${xFor(i)}" y="${H - 7}" text-anchor="${i === 0 ? 'start' : i === days.length - 1 ? 'end' : 'middle'}">${label}</text>`;
   }).join('');
 
-  const markers = days.map((d, i) => {
-    if(!tracked[i]) return '';
+  const markerIndexes = days.flatMap((date, i) => tracked[i] || pauseOn(date) ? [i] : []);
+  const halfHitWidth = Math.max(12, halfDayWidth);
+  const markers = markerIndexes.map((i, index) => {
+    const d = days[i];
     const score = scores[i];
     const success = dailyBase + (manualByDate[d] || 0) >= successThreshold;
     const dateLabel = new Date(d + 'T12:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
-    const hitWidth = Math.max(8, plotW / Math.max(1, days.length - 1));
-    return `<rect class="chart-hit" x="${xFor(i) - hitWidth / 2}" y="${top}" width="${hitWidth}" height="${plotH}" data-action="open-day" data-date="${d}" role="button" tabindex="0" aria-label="${dateLabel}: score ${Math.round(score)}. Open activity."></rect>
-      <circle class="chart-dot${success ? ' success' : ''}" cx="${xFor(i)}" cy="${yFor(score)}" r="${days.length > 90 ? 2.2 : 3.2}" pointer-events="none"></circle>`;
-  }).join('');
-  const selectedIndex = Math.max(0, days.indexOf(selectedHistoryDate));
-  const selectedScore = scores[selectedIndex];
-  const selectedTracked = tracked[selectedIndex];
-  const selectedDateLabel = new Date(selectedHistoryDate + 'T12:00:00').toLocaleDateString('en-US', {
-    weekday:'short', month:'short', day:'numeric', year:'numeric'
+    const x = xFor(i);
+    const leftBoundary = index > 0 ? (x + xFor(markerIndexes[index - 1])) / 2 : left;
+    const rightBoundary = index < markerIndexes.length - 1 ? (x + xFor(markerIndexes[index + 1])) / 2 : left + plotW;
+    const hitStart = Math.max(x - halfHitWidth, leftBoundary);
+    const hitEnd = Math.min(x + halfHitWidth, rightBoundary);
+    const dayAction = `data-action="open-day" data-date="${d}"`;
+    return {
+      hit:`<rect class="chart-hit" x="${hitStart}" y="${top}" width="${hitEnd - hitStart}" height="${plotH}" ${dayAction} role="button" tabindex="0" aria-label="${dateLabel}: ${tracked[i] ? 'score ' + Math.round(score) : 'paused'}. Open activity."></rect>`,
+      dot:tracked[i] ? `<circle class="chart-dot${success ? ' success' : ''}" cx="${x}" cy="${yFor(score)}" r="${days.length > 90 ? 2.2 : 3.2}" ${dayAction} aria-hidden="true"></circle>` : ''
+    };
   });
-  const selection = `<line class="chart-selected-guide" x1="${xFor(selectedIndex)}" y1="${top}" x2="${xFor(selectedIndex)}" y2="${top + plotH}"></line>
-    ${selectedTracked ? `<circle class="chart-selected-dot" cx="${xFor(selectedIndex)}" cy="${yFor(selectedScore)}" r="4.2"></circle>` : ''}`;
-
+  const selectedIndex = Math.max(0, days.indexOf(selectedHistoryDate));
   el.innerHTML = `<svg class="line-chart" viewBox="0 0 ${W} ${H}" role="group" aria-label="Tracked daily score history since ${statsStartKey()}. Unknown days are omitted.">
+    <rect class="chart-plot" x="${left}" y="${top}" width="${plotW}" height="${plotH}" fill="transparent"></rect>
+    ${pauseBands}
     ${yGrid}
     ${xLabels}
     <path class="chart-score-line" d="${pathForObserved(scores)}"></path>
     ${scoreGapPath ? `<path class="chart-score-gap" d="${scoreGapPath}"></path>` : ''}
     ${showAverage ? `<path class="chart-average-line" d="${pathForObserved(rolling)}"></path>` : ''}
     ${averageGapPath ? `<path class="chart-average-gap" d="${averageGapPath}"></path>` : ''}
-    ${selection}
-    ${markers}
+    <line class="chart-selected-guide" y1="${top}" y2="${top + plotH}" pointer-events="none"></line>
+    ${markers.map(marker => marker.hit).join('')}
+    <circle class="chart-selected-dot" r="4.2" data-action="open-day" aria-hidden="true"></circle>
+    ${markers.map(marker => marker.dot).join('')}
   </svg>
   <div class="chart-selection-readout" role="status" aria-live="polite">
-    <span>${selectedDateLabel}${selectedTracked ? '' : ' · Untracked'}</span>
-    <strong class="mono">${selectedTracked ? Math.round(selectedScore) : '—'}</strong>
+    <span></span><strong class="mono"></strong>
   </div>
   <div class="chart-legend">
     <span class="legend-item"><span class="legend-swatch"></span>Daily score</span>
     ${showAverage ? `<span class="legend-item"><span class="legend-swatch average"></span>7 tracked-day moving average</span>` : ''}
+    ${pauseBands ? '<span class="legend-item"><span class="legend-swatch paused"></span>Travel pause</span>' : ''}
     ${scoreGapPath ? `<span class="legend-item"><span class="legend-swatch gap"></span>Unknown gap</span>` : ''}
     <span class="legend-item"><span class="legend-swatch baseline"></span>Baseline</span>
-  </div>`;
+  </div>
+  <div class="chart-hint">Hover or hold and slide to see scores. Tap a point for details.</div>`;
+
+  const svg = el.querySelector('svg');
+  const guide = svg.querySelector('.chart-selected-guide');
+  const dot = svg.querySelector('.chart-selected-dot');
+  const label = el.querySelector('.chart-selection-readout span');
+  const value = el.querySelector('.chart-selection-readout strong');
+  let shownIndex = null;
+  function showDay(i){
+    if(i === shownIndex) return;
+    shownIndex = i;
+    const x = xFor(i);
+    guide.setAttribute('x1', x);
+    guide.setAttribute('x2', x);
+    dot.setAttribute('visibility', tracked[i] ? 'visible' : 'hidden');
+    if(tracked[i]){
+      dot.dataset.date = days[i];
+      dot.setAttribute('cx', x);
+      dot.setAttribute('cy', yFor(scores[i]));
+    }
+    const date = new Date(days[i] + 'T12:00:00');
+    label.textContent = date.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' }) +
+      (tracked[i] ? '' : pauseOn(days[i]) ? ' · Paused' : ' · Untracked');
+    value.textContent = tracked[i] ? Math.round(scores[i]) : '—';
+  }
+  showDay(selectedIndex);
+  bindChartPreview(svg, days, showDay, () => showDay(selectedIndex));
 
   let successCount = 0, trackedCount = 0;
   days.forEach((d, i) => {
@@ -4110,7 +4535,7 @@ function renderDayActivity(ledger = summarizeLedger()){
   document.getElementById('dayModalTitle').textContent = dateLabel;
   document.getElementById('daySummary').innerHTML = tracked
     ? `<strong class="mono">${score}</strong> score &nbsp;·&nbsp; <span class="mono">${netLabel}</span> net &nbsp;·&nbsp; ${dayEntries.length} item${dayEntries.length === 1 ? '' : 's'}`
-    : `<strong>Untracked</strong> &nbsp;·&nbsp; no score or statistics recorded`;
+    : pauseOn(selectedDayKey) ? '<strong>Paused</strong> · 0 points counted' : `<strong>Untracked</strong> &nbsp;·&nbsp; no score or statistics recorded`;
 
   document.getElementById('previousDayBtn').disabled = selectedDayKey <= statsStartKey();
   document.getElementById('nextDayBtn').disabled = selectedDayKey >= todayKey();
@@ -4123,7 +4548,7 @@ function renderDayActivity(ledger = summarizeLedger()){
   if(!dayEntries.length){
     list.innerHTML = tracked
       ? `<div class="empty">No activity recorded. This completed day is tracked at baseline ${dailyBase}.</div>`
-      : `<div class="empty">No activity recorded. This day is unknown and excluded from averages, trends, and streak progress.</div>`;
+      : pauseOn(selectedDayKey) ? '<div class="empty">No activity recorded during this pause.</div>' : `<div class="empty">No activity recorded. This day is unknown and excluded from averages, trends, and streak progress.</div>`;
     return;
   }
 
@@ -4137,7 +4562,7 @@ function renderDayActivity(ledger = summarizeLedger()){
     return `<div class="row">
       <div class="row-main">
         <div class="row-name">${escapeHtml(entry.name)}</div>
-        <span class="entry-type-badge">${typeLabel} · ${time}</span>
+        <span class="entry-type-badge">${typeLabel} · ${time}${pauseOn(entry.date) ? ' · Excluded' : ''}</span>
         ${entry.derived && entry.description ? `<span class="row-sub">${escapeHtml(entry.description)}</span>` : ''}
       </div>
       <span class="pill ${tone} mono" style="pointer-events:none">${sign}${points}</span>
@@ -4345,7 +4770,7 @@ function computeStats(ledger = summarizeLedger()){
   }
   const start = statsStartKey();
   for(const entry of entries){
-    if(entry.date < start || entry.date > end) continue;
+    if(entry.date < start || entry.date > end || pauseOn(entry.date)) continue;
     addContribution(entry.type === 'bad' ? drains : gains, entry.name, Number(entry.points) || 0);
   }
   if(bonusDates.size){
@@ -4474,6 +4899,10 @@ function computeTrends(ledger = summarizeLedger()){
   const daysUntilEndOfYear = Math.max(0, calendarDaysInclusive(today, endOfYearKey) - 1);
   const observedScoreTotal = dates.reduce((sum, date) => sum + dailyBase + (byDate[date] || 0), 0);
   const recentPaceScore = dailyBase + avgDailyNet;
+  const futureCountingDays = days => countingDaysBetween(addDaysToKey(today, 1), addDaysToKey(today, days));
+  const monthDays = futureCountingDays(30);
+  const quarterDays = futureCountingDays(90);
+  const yearDays = futureCountingDays(daysUntilEndOfYear);
   const projectedAverage = futureDays => {
     const projectedDays = Math.max(0, Number(futureDays) || 0);
     return (observedScoreTotal + recentPaceScore * projectedDays) / (observationDays + projectedDays);
@@ -4484,12 +4913,12 @@ function computeTrends(ledger = summarizeLedger()){
     dowNames, dowAverages, bestDow, worstDow,
     avgDailyNet, recentPaceScore, paceDays,
     projections: {
-      d30: projectedAverage(30),
-      d90: projectedAverage(90),
-      eoy: projectedAverage(daysUntilEndOfYear),
-      d30Net: allTimeNet + avgDailyNet * 30,
-      d90Net: allTimeNet + avgDailyNet * 90,
-      eoyNet: allTimeNet + avgDailyNet * daysUntilEndOfYear,
+      d30: projectedAverage(monthDays),
+      d90: projectedAverage(quarterDays),
+      eoy: projectedAverage(yearDays),
+      d30Net: allTimeNet + avgDailyNet * monthDays,
+      d90Net: allTimeNet + avgDailyNet * quarterDays,
+      eoyNet: allTimeNet + avgDailyNet * yearDays,
       daysUntilEndOfYear
     }
   };
@@ -4584,7 +5013,7 @@ let undoToastTimer = null;
 let undoCallback = null;
 function showUndoToast(entry){
   const sign = entry.points > 0 ? '+' : '';
-  showUndoAction(`${sign}${entry.points} · ${entry.name}`, () => deleteEntry(entry.id, false));
+  showUndoAction(`${sign}${entry.points} · ${entry.name}${pauseOn(entry.date) ? ' · Excluded' : ''}`, () => deleteEntry(entry.id, false));
 }
 function showUndoAction(message, callback){
   document.getElementById('undoToastText').textContent = message;
@@ -4640,7 +5069,7 @@ function renderActivityLog(ledger = summarizeLedger()){
       <div class="row">
         <div class="row-main">
           <div class="row-name">${escapeHtml(e.name)}</div>
-          <div class="row-sub mono">${e.derived ? `${automaticEntryLabel(e)} · ${time}` : time}</div>
+          <div class="row-sub mono">${e.derived ? `${automaticEntryLabel(e)} · ${time}` : time}${pauseOn(date) ? ' · Excluded' : ''}</div>
         </div>
         <span class="pill ${tone} mono" style="pointer-events:none;">${sign}${points}</span>
         ${e.derived ? '' : `<button type="button" class="edit-btn" data-action="remove-entry" data-id="${escapeHtml(e.id)}" aria-label="Remove ${escapeHtml(e.name)} from ${date}">✕</button>`}
@@ -4894,6 +5323,13 @@ document.addEventListener('click', event => {
   const action = target.dataset.action;
   const id = target.dataset.id;
   switch(action){
+    case 'open-travel': openTravel(target.dataset.date || (activeView === 'today' ? activeLedgerDate() : selectedHistoryDate || todayKey())); break;
+    case 'new-travel': editTravelPause(null); break;
+    case 'edit-travel': editTravelPause(id); break;
+    case 'save-travel': saveTravelPause(); break;
+    case 'resume-travel': resumeTravelToday(); break;
+    case 'remove-travel': applyTravelEdit(travelPauses.filter(p => p.id !== editingPause?.id)); break;
+    case 'close-travel': closeDialog('travelOverlay'); break;
     case 'switch-view': switchView(target.dataset.view); break;
     case 'toggle-activity': toggleActivityLog(); break;
     case 'navigate-today': navigateToday(target.dataset.offset); break;
@@ -4994,23 +5430,26 @@ document.getElementById('restoreFileInput').addEventListener('change', async eve
   }
 });
 document.getElementById('csvRestoreFileInput').addEventListener('change', async event => {
-  const file = event.target.files && event.target.files[0];
+  const input = event.currentTarget;
+  const file = input.files?.[0];
   pendingCsvBackupText = null;
   setCsvButtonsDisabled(true);
   if(!file) return;
   if(file.size > 10 * 1024 * 1024){
     setBackupStatus('That CSV file is too large to be a Tally backup.', 'error');
-    event.target.value = '';
+    input.value = '';
     return;
   }
   try{
     const text = await file.text();
+    if(input.files?.[0] !== file) return;
     const clean = parseFullCsvBackup(text);
     pendingCsvBackupText = text;
     setCsvButtonsDisabled(false);
     setBackupStatus(`CSV ready to restore ${backupContentsLabel(clean)}.`, 'success');
   }catch(e){
-    event.target.value = '';
+    if(input.files?.[0] !== file) return;
+    input.value = '';
     setBackupStatus(`CSV backup not accepted: ${e.message}`, 'error');
   }
 });
@@ -5054,6 +5493,7 @@ document.addEventListener('keydown', event => {
   if(event.key === 'Escape'){
     event.preventDefault();
     if(top.id === 'confirmOverlay') resolveConfirm(false);
+    else if(top.id === 'travelOverlay') closeDialog('travelOverlay');
     else if(top.id === 'habitOverlay') closeHabitModal();
     else if(top.id === 'bonusOverlay') closeBonusModal();
     else if(top.id === 'dailyBonusOverlay') closeDailyBonusModal();
