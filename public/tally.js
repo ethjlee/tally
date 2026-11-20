@@ -4223,17 +4223,19 @@ function chartStepForDeviation(maxDeviation){
   return factor * magnitude;
 }
 
-function bindChartPreview(svg, days, showDay, restoreSelection){
+function bindChartPreview(svg, days, showDay, selectDay, restoreSelection){
   const plot = svg.querySelector('.chart-plot');
   let press = null;
   let suppressClick = false;
 
-  function dayAt(event){
+  function dayAt(event, dragging = false){
     // The SVG can be letterboxed. Measure the plot itself in screen coordinates.
     const bounds = plot.getBoundingClientRect();
-    if(!bounds.width || event.clientX < bounds.left || event.clientX > bounds.right ||
-       event.clientY < bounds.top || event.clientY > bounds.bottom) return null;
-    return Math.round((event.clientX - bounds.left) / bounds.width * (days.length - 1));
+    if(!bounds.width) return null;
+    if(!dragging && (event.clientX < bounds.left || event.clientX > bounds.right ||
+       event.clientY < bounds.top || event.clientY > bounds.bottom)) return null;
+    const fraction = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+    return Math.round(fraction * (days.length - 1));
   }
 
   svg.addEventListener('pointerdown', event => {
@@ -4243,43 +4245,45 @@ function bindChartPreview(svg, days, showDay, restoreSelection){
     const hitDate = event.target.closest('[data-action="open-day"]')?.dataset.date;
     const index = hitDate ? days.indexOf(hitDate) : dayAt(event);
     if(index === null || index < 0) return;
-    const hold = { id:event.pointerId, x:event.clientX, y:event.clientY, active:false };
-    press = hold;
-    hold.timer = setTimeout(() => {
-      if(!svg.isConnected || press !== hold) return;
-      hold.active = true;
-      suppressClick = true;
-      svg.setPointerCapture(event.pointerId);
-      showDay(index);
-    }, 350);
+    press = { id:event.pointerId, x:event.clientX, y:event.clientY, startedAt:event.timeStamp, index, dragging:false };
+    event.target.setPointerCapture?.(event.pointerId);
+    showDay(index);
   });
   svg.addEventListener('pointermove', event => {
     if(event.isPrimary === false) return;
-    if(event.pointerType !== 'mouse'){
-      if(!press || press.id !== event.pointerId) return;
-      if(!press.active){
-        if(Math.hypot(event.clientX - press.x, event.clientY - press.y) > 8){
-          clearTimeout(press.timer);
-          suppressClick = true;
-        }
-        return;
-      }
+    if(event.pointerType === 'mouse'){
+      const index = dayAt(event);
+      if(index === null) restoreSelection();
+      else showDay(index);
+      return;
     }
-    const index = dayAt(event);
-    if(index === null) restoreSelection();
-    else showDay(index);
-  });
-  function finishPress(event){
     if(!press || press.id !== event.pointerId) return;
-    clearTimeout(press.timer);
+    if(!press.dragging){
+      const horizontal = Math.abs(event.clientX - press.x);
+      const vertical = Math.abs(event.clientY - press.y);
+      if(Math.max(horizontal, vertical) > 8) suppressClick = true;
+      if(horizontal <= 8 || horizontal < vertical) return;
+      press.dragging = true;
+    }
+    const index = dayAt(event, true);
+    if(index !== null){
+      press.index = index;
+      showDay(index);
+    }
+  });
+  svg.addEventListener('pointerup', event => {
+    if(!press || press.id !== event.pointerId) return;
+    if(event.timeStamp - press.startedAt >= 350) suppressClick = true;
+    selectDay(press.index);
+    press = null;
+  });
+  function cancelPress(event){
+    if(!press || press.id !== event.pointerId) return;
     press = null;
     restoreSelection();
   }
-  svg.addEventListener('pointerup', finishPress);
-  svg.addEventListener('pointercancel', finishPress);
-  svg.addEventListener('lostpointercapture', event => {
-    if(!svg.hasPointerCapture(event.pointerId)) finishPress(event);
-  });
+  svg.addEventListener('pointercancel', cancelPress);
+  svg.addEventListener('lostpointercapture', cancelPress);
   svg.addEventListener('pointerleave', event => {
     if(event.pointerType === 'mouse') restoreSelection();
   });
@@ -4414,7 +4418,7 @@ function renderHistory(ledger = summarizeLedger()){
       dot:tracked[i] ? `<circle class="chart-dot${success ? ' success' : ''}" cx="${x}" cy="${yFor(score)}" r="${days.length > 90 ? 2.2 : 3.2}" ${dayAction} aria-hidden="true"></circle>` : ''
     };
   });
-  const selectedIndex = Math.max(0, days.indexOf(selectedHistoryDate));
+  let selectedIndex = Math.max(0, days.indexOf(selectedHistoryDate));
   el.innerHTML = `<svg class="line-chart" viewBox="0 0 ${W} ${H}" role="group" aria-label="Tracked daily score history since ${statsStartKey()}. Unknown days are omitted.">
     <rect class="chart-plot" x="${left}" y="${top}" width="${plotW}" height="${plotH}" fill="transparent"></rect>
     ${pauseBands}
@@ -4439,7 +4443,7 @@ function renderHistory(ledger = summarizeLedger()){
     ${scoreGapPath ? `<span class="legend-item"><span class="legend-swatch gap"></span>Unknown gap</span>` : ''}
     <span class="legend-item"><span class="legend-swatch baseline"></span>Baseline</span>
   </div>
-  <div class="chart-hint">Hover or hold and slide to see scores. Tap a point for details.</div>`;
+  <div class="chart-hint">Hover or drag across the graph to see scores. Tap a point for details.</div>`;
 
   const svg = el.querySelector('svg');
   const guide = svg.querySelector('.chart-selected-guide');
@@ -4465,7 +4469,10 @@ function renderHistory(ledger = summarizeLedger()){
     value.textContent = tracked[i] ? Math.round(scores[i]) : '—';
   }
   showDay(selectedIndex);
-  bindChartPreview(svg, days, showDay, () => showDay(selectedIndex));
+  bindChartPreview(svg, days, showDay, index => {
+    selectedIndex = index;
+    selectedHistoryDate = days[index];
+  }, () => showDay(selectedIndex));
 
   let successCount = 0, trackedCount = 0;
   days.forEach((d, i) => {

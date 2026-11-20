@@ -46,7 +46,9 @@ const nextConfig: NextConfig = {
       { source: "/tally-v11.html", destination: "/tally.html" },
       { source: "/tally-v11.js", destination: "/tally.js" },
       { source: "/tally-v12.html", destination: "/tally.html" },
-      { source: "/tally-v12.js", destination: "/tally.js" }
+      { source: "/tally-v12.js", destination: "/tally.js" },
+      { source: "/tally-v13.html", destination: "/tally.html" },
+      { source: "/tally-v13.js", destination: "/tally.js" }
     ];
   },
   async headers() {

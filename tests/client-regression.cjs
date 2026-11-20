@@ -874,10 +874,10 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
   chart.querySelector('.chart-plot').getBoundingClientRect = () => ({
     left:40, right:240, top:10, bottom:210, width:200
   });
-  chart.setPointerCapture = () => {};
-  function chartPointer(type, pointerType, x){
-    const event = new window.MouseEvent(type, { bubbles:true, clientX:x, clientY:50 });
+  function chartPointer(type, pointerType, x, { y = 50, time } = {}){
+    const event = new window.MouseEvent(type, { bubbles:true, clientX:x, clientY:y });
     Object.assign(event, { pointerType, pointerId:1, isPrimary:true });
+    if(time !== undefined) Object.defineProperty(event, 'timeStamp', { value:time });
     firstPoint.dispatchEvent(event);
   }
   chartPointer('pointermove', 'mouse', 40);
@@ -886,16 +886,28 @@ function setLedger({ start, entries = [], completedDays = [], milestones = [], d
   eq(chartScore(), '—', 'Hover over an unknown day shows a gap');
   chartPointer('pointerleave', 'mouse', 245);
   eq(chartScore(), '130', 'Leaving the chart restores the selected date');
-  chartPointer('pointerdown', 'touch', 40);
-  await waitFor(() => chartScore() === '110');
-  chartPointer('pointermove', 'touch', 240);
-  eq(chartScore(), '130', 'Sliding a held finger previews another day');
-  chartPointer('pointerup', 'touch', 240);
   const tapClick = () => firstPoint.dispatchEvent(new window.MouseEvent('click', { bubbles:true, detail:1 }));
+  chartPointer('pointerdown', 'touch', 40);
+  eq(chartScore(), '110', 'Touch shows a score immediately');
+  chartPointer('pointermove', 'touch', 140);
+  eq(chartScore(), '—', 'Dragging immediately previews the next day');
+  chartPointer('pointerup', 'touch', 140);
+  eq(chartScore(), '—', 'The preview stays visible after lifting a finger');
+  eq(window.eval('selectedHistoryDate'), d2, 'A touch drag selects the previewed date');
+  tapClick();
+  eq(window.eval('selectedDayKey'), null, 'A touch drag does not open day details');
+
+  chartPointer('pointerdown', 'touch', 40);
+  chartPointer('pointermove', 'touch', 41, { y:110 });
+  chartPointer('pointercancel', 'touch', 41, { y:110 });
+  eq(chartScore(), '—', 'A cancelled touch scroll restores the last selected preview');
+
+  chartPointer('pointerdown', 'touch', 40, { time:100 });
+  chartPointer('pointerup', 'touch', 40, { time:500 });
   tapClick();
   eq(window.eval('selectedDayKey'), null, 'Releasing a long press leaves detail closed');
-  chartPointer('pointerdown', 'touch', 40);
-  chartPointer('pointerup', 'touch', 40);
+  chartPointer('pointerdown', 'touch', 40, { time:600 });
+  chartPointer('pointerup', 'touch', 40, { time:650 });
   tapClick();
   eq(window.eval('selectedDayKey'), d1, 'The next quick tap opens the tapped day');
   window.closeDayActivity();
