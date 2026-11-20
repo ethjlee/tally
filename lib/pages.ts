@@ -6,8 +6,8 @@ type PageOptions = {
   script: string;
 };
 
-export function securePage(options: PageOptions): string {
-  return `<!doctype html>
+export function securePage(options: PageOptions): Response {
+  const html = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -17,7 +17,7 @@ export function securePage(options: PageOptions): string {
   <title>${options.title}</title>
   <link rel="icon" href="/icons/tally.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/auth.css">
-  <script src="${options.script}" defer></script>
+  <script type="module" src="${options.script}"></script>
 </head>
 <body>
   <main class="auth-shell">
@@ -28,14 +28,12 @@ export function securePage(options: PageOptions): string {
       </div>
       <h1 id="page-title">${options.heading}</h1>
       <p class="intro">${options.intro}</p>
+      <noscript><p>Enable JavaScript to use this form.</p></noscript>
       ${options.body}
     </section>
   </main>
 </body>
 </html>`;
-}
-
-export function pageResponse(html: string): Response {
   return new Response(html, {
     headers: {
       "Cache-Control": "private, no-store, max-age=0",

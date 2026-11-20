@@ -188,6 +188,14 @@
             <span class="manage-copy"><span class="manage-title">Sync now</span><span class="manage-sub">Safely reconcile this device with your encrypted cloud ledger.</span></span>
             <span class="manage-arrow" aria-hidden="true">↻</span>
           </button>
+          <div id="cloudRollbackActions" hidden>
+            <button type="button" class="manage-row" data-action="resolve-cloud-rollback" data-choice="cloud">
+              <span class="manage-copy"><span class="manage-title">Keep cloud ledger</span><span class="manage-sub">Replace this device’s ledger with the restored cloud copy.</span></span>
+            </button>
+            <button type="button" class="manage-row" data-action="resolve-cloud-rollback" data-choice="device">
+              <span class="manage-copy"><span class="manage-title">Keep device ledger</span><span class="manage-sub">Replace the restored cloud ledger with this device’s copy.</span></span>
+            </button>
+          </div>
           <button type="button" class="manage-row" data-action="open-account">
             <span class="manage-copy"><span class="manage-title">Account security</span><span class="manage-sub">Change your password and revoke other sessions.</span></span>
             <span class="manage-arrow" aria-hidden="true">›</span>
@@ -570,6 +578,6 @@
   </div>
 </div>
 
-<script src="/tally-v13.js" defer></script>
+<script src="/tally-v19.js" defer></script>
 </body>
 </html>

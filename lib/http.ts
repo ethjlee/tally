@@ -16,6 +16,10 @@ export function privateJson(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), { ...init, headers });
 }
 
+export function redirectTo(request: Request, destination: string): Response {
+  return Response.redirect(new URL(destination, request.url), 303);
+}
+
 export function sameOrigin(request: Request): boolean {
   const requestOrigin = new URL(request.url).origin;
   const origin = request.headers.get("origin");

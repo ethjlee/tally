@@ -1,18 +1,15 @@
+import { redirectTo } from "../lib/http";
 import { requireSession, withSessionCookies } from "../lib/session";
 import { ownerExists } from "../lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function redirect(request: Request, destination: string): Response {
-  return Response.redirect(new URL(destination, request.url), 303);
-}
-
 export async function GET(request: Request) {
   try {
-    if (!(await ownerExists())) return redirect(request, "/setup");
+    if (!(await ownerExists())) return redirectTo(request, "/setup");
     const { session, sessionHeaders } = await requireSession(request);
-    return withSessionCookies(redirect(request, session ? "/tally.html" : "/login"), sessionHeaders);
+    return withSessionCookies(redirectTo(request, session ? "/tally.html" : "/login"), sessionHeaders);
   } catch {
     return new Response(
       "Tally is not initialized yet. Run the database migration, then reload.",

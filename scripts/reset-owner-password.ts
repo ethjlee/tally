@@ -1,6 +1,7 @@
-import { timingSafeEqual } from "node:crypto";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, setupTokensMatch } from "../lib/credentials";
 import { stdin, stdout } from "node:process";
 import { config } from "dotenv";
+import { getPool } from "../lib/db";
 import { hashPassword } from "better-auth/crypto";
 
 config({ path: ".env.local", override: false, quiet: true });
@@ -45,12 +46,6 @@ function hiddenPrompt(label: string): Promise<string> {
   });
 }
 
-function tokensMatch(candidate: string, expected: string): boolean {
-  const left = Buffer.from(candidate, "utf8");
-  const right = Buffer.from(expected, "utf8");
-  return left.length === right.length && timingSafeEqual(left, right);
-}
-
 async function main() {
   const expectedToken = process.env.TALLY_SETUP_TOKEN?.trim();
   if (!expectedToken || Buffer.byteLength(expectedToken, "utf8") < 32) {
@@ -58,18 +53,18 @@ async function main() {
   }
 
   const token = await hiddenPrompt("Current TALLY_SETUP_TOKEN: ");
-  if (!tokensMatch(token, expectedToken)) {
+  if (!setupTokensMatch(token, expectedToken)) {
     throw new Error("Setup token did not match.");
   }
 
-  const password = await hiddenPrompt("New owner password (14–128 characters): ");
+  const password = await hiddenPrompt(`New owner password (${MIN_PASSWORD_LENGTH}–${MAX_PASSWORD_LENGTH} characters): `);
   const confirmation = await hiddenPrompt("Confirm new owner password: ");
   if (password !== confirmation) throw new Error("Passwords did not match.");
-  if (password.length < 14 || password.length > 128) {
-    throw new Error("Password must contain 14–128 characters.");
+  if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+    throw new Error(`Password must contain ${MIN_PASSWORD_LENGTH}–${MAX_PASSWORD_LENGTH} characters.`);
   }
 
-  const { pool } = await import("../lib/db");
+  const pool = getPool();
   try {
     const users = await pool.query<{ id: string; username: string | null }>(
       `SELECT id, username FROM "user" ORDER BY "createdAt" LIMIT 2`

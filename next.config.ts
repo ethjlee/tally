@@ -34,21 +34,10 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
   async rewrites() {
+    const releases = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
     return [
-      { source: "/tally-v7.html", destination: "/tally.html" },
-      { source: "/tally-v7.js", destination: "/tally.js" },
-      { source: "/tally-v8.html", destination: "/tally.html" },
-      { source: "/tally-v8.js", destination: "/tally.js" },
-      { source: "/tally-v9.html", destination: "/tally.html" },
-      { source: "/tally-v9.js", destination: "/tally.js" },
-      { source: "/tally-v10.html", destination: "/tally.html" },
-      { source: "/tally-v10.js", destination: "/tally.js" },
-      { source: "/tally-v11.html", destination: "/tally.html" },
-      { source: "/tally-v11.js", destination: "/tally.js" },
-      { source: "/tally-v12.html", destination: "/tally.html" },
-      { source: "/tally-v12.js", destination: "/tally.js" },
-      { source: "/tally-v13.html", destination: "/tally.html" },
-      { source: "/tally-v13.js", destination: "/tally.js" }
+      { source: "/tally.js", destination: "/assets/ledger.js" },
+      ...releases.map(version => ({ source: `/tally-v${version}.js`, destination: "/assets/ledger.js" }))
     ];
   },
   async headers() {

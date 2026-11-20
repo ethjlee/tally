@@ -1,5 +1,7 @@
 node_modules/
 .next/
+public/assets/ledger.js
+public/tally-v*.html
 .vercel/
 .env
 .env.local

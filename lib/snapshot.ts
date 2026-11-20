@@ -1,21 +1,12 @@
 import { z } from "zod";
+import { isValidDateKey, MAX_MANUAL_ORDER, SCHEMA_VERSION as CURRENT_SNAPSHOT_VERSION, SYNC_COLLECTION_LIMITS } from "../shared/ledger-contract";
 
-export const CURRENT_SNAPSHOT_VERSION = 8;
+export { CURRENT_SNAPSHOT_VERSION };
 
 const id = z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/);
 const name = z.string().trim().min(1).max(60);
 const description = z.string().trim().max(160);
-const dateKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
-  const [year, month, day] = value.split("-").map(Number);
-  const date = new Date(0);
-  date.setUTCHours(12, 0, 0, 0);
-  date.setUTCFullYear(year, month - 1, day);
-  return (
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
-  );
-}, "Invalid calendar date");
+const dateKey = z.string().refine(isValidDateKey, "Invalid calendar date");
 const timestamp = z.number().int().min(0).max(8_640_000_000_000_000);
 const isoTimestamp = z.string().max(40).refine(
   (value) => Number.isFinite(new Date(value).getTime()),
@@ -29,7 +20,7 @@ const habitV4 = z.object({
   points: z.number().int().min(1).max(999),
   streak: z.number().int().min(0).max(100_000),
   lastDate: dateKey.nullable(),
-  order: z.number().int().min(0).max(1_000_000)
+  order: z.number().int().min(0).max(MAX_MANUAL_ORDER)
 }).strict();
 const habit = habitV4.extend({
   sectionId: id.nullable()
@@ -39,7 +30,7 @@ const bonusTaskV4 = z.object({
   id,
   name,
   points: z.number().int().min(1).max(999),
-  order: z.number().int().min(0).max(1_000_000)
+  order: z.number().int().min(0).max(MAX_MANUAL_ORDER)
 }).strict();
 const bonusTask = bonusTaskV4.extend({
   sectionId: id.nullable()
@@ -49,7 +40,7 @@ const taskSectionV5 = z.object({
   id,
   name: z.string().trim().min(1).max(40),
   kind: z.enum(["good", "bad", "bonus"]),
-  order: z.number().int().min(0).max(1_000_000)
+  order: z.number().int().min(0).max(MAX_MANUAL_ORDER)
 }).strict();
 const taskSection = taskSectionV5.extend({
   kind: z.enum(["habit", "bonus"])
@@ -108,13 +99,16 @@ function uniqueBy<T>(
   }
 }
 
+const commonCollections = {
+  milestones: z.array(milestone).max(SYNC_COLLECTION_LIMITS.milestones),
+  completedDays: z.array(completedDay).max(SYNC_COLLECTION_LIMITS.completedDays),
+  entries: z.array(entry).max(SYNC_COLLECTION_LIMITS.entries)
+};
 const dataShape = {
-  taskSections: z.array(taskSection).max(1_000),
-  habits: z.array(habit).max(1_000),
-  bonusTasks: z.array(bonusTask).max(1_000),
-  milestones: z.array(milestone).max(1_000),
-  completedDays: z.array(completedDay).max(100_000),
-  entries: z.array(entry).max(100_000)
+  taskSections: z.array(taskSection).max(SYNC_COLLECTION_LIMITS.taskSections),
+  habits: z.array(habit).max(SYNC_COLLECTION_LIMITS.habits),
+  bonusTasks: z.array(bonusTask).max(SYNC_COLLECTION_LIMITS.bonusTasks),
+  ...commonCollections
 };
 const validateCollections = (sectionMode: "topic" | "legacy") => (
   value: {
@@ -154,7 +148,7 @@ const validateCollections = (sectionMode: "topic" | "legacy") => (
 const data = z.object(dataShape).strict().superRefine(validateCollections("topic"));
 const dataV7 = z.object({
   ...dataShape,
-  dailyBonuses: z.array(dailyBonus).max(1_000)
+  dailyBonuses: z.array(dailyBonus).max(SYNC_COLLECTION_LIMITS.dailyBonuses)
 }).strict().superRefine(validateCollections("topic"));
 
 const settingsBase = z.object({
@@ -195,15 +189,13 @@ const settingsV5 = settingsBase.extend({
   }).strict()
 }).strict();
 
-const snapshotV6Schema = z.object({
+const snapshotEnvelope = z.object({
   app: z.literal("Tally"),
-  schemaVersion: z.literal(6),
   savedAt: isoTimestamp.optional(),
   revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-  writerId: id.nullable().optional(),
-  data,
-  settings
+  writerId: id.nullable().optional()
 }).strict();
+const snapshotV6Schema = snapshotEnvelope.extend({ schemaVersion: z.literal(6), data, settings });
 const snapshotV7Schema = snapshotV6Schema.extend({
   schemaVersion: z.literal(7),
   data: dataV7
@@ -211,67 +203,50 @@ const snapshotV7Schema = snapshotV6Schema.extend({
 
 // Accept deployed snapshots so a new client can load them and write the current schema.
 const legacyDataV5 = z.object({
-  taskSections: z.array(taskSectionV5).max(1_000),
-  habits: z.array(habit).max(1_000),
-  bonusTasks: z.array(bonusTask).max(1_000),
-  milestones: z.array(milestone).max(1_000),
-  completedDays: z.array(completedDay).max(100_000),
-  entries: z.array(entry).max(100_000)
+  ...dataShape,
+  taskSections: z.array(taskSectionV5).max(SYNC_COLLECTION_LIMITS.taskSections)
 }).strict().superRefine(validateCollections("legacy"));
-const snapshotV5Schema = z.object({
-  app: z.literal("Tally"),
+const snapshotV5Schema = snapshotEnvelope.extend({
   schemaVersion: z.literal(5),
-  savedAt: isoTimestamp.optional(),
-  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-  writerId: id.nullable().optional(),
   data: legacyDataV5,
   settings: settingsV5
-}).strict();
+});
 
 const legacyDataV4 = z.object({
-  habits: z.array(habitV4).max(1_000),
-  bonusTasks: z.array(bonusTaskV4).max(1_000),
-  milestones: z.array(milestone).max(1_000),
-  completedDays: z.array(completedDay).max(100_000),
-  entries: z.array(entry).max(100_000)
+  habits: z.array(habitV4).max(SYNC_COLLECTION_LIMITS.habits),
+  bonusTasks: z.array(bonusTaskV4).max(SYNC_COLLECTION_LIMITS.bonusTasks),
+  ...commonCollections
 }).strict().superRefine(validateCollections("legacy"));
-const snapshotV4Schema = z.object({
-  app: z.literal("Tally"),
+const snapshotV4Schema = snapshotEnvelope.extend({
   schemaVersion: z.literal(4),
-  savedAt: isoTimestamp.optional(),
-  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-  writerId: id.nullable().optional(),
   data: legacyDataV4,
   settings: settingsV5
-}).strict();
+});
 
 const legacyHabitV3 = habitV4.omit({ order: true });
 const legacyBonusTaskV3 = bonusTaskV4.omit({ order: true });
 const legacyDataV3 = z.object({
-  habits: z.array(legacyHabitV3).max(1_000),
-  bonusTasks: z.array(legacyBonusTaskV3).max(1_000),
-  milestones: z.array(milestone).max(1_000),
-  completedDays: z.array(completedDay).max(100_000),
-  entries: z.array(entry).max(100_000)
+  habits: z.array(legacyHabitV3).max(SYNC_COLLECTION_LIMITS.habits),
+  bonusTasks: z.array(legacyBonusTaskV3).max(SYNC_COLLECTION_LIMITS.bonusTasks),
+  ...commonCollections
 }).strict().superRefine(validateCollections("legacy"));
 const legacySettingsV3 = settingsV5.omit({ taskSortModes: true });
-const snapshotV3Schema = z.object({
-  app: z.literal("Tally"),
+const snapshotV3Schema = snapshotEnvelope.extend({
   schemaVersion: z.literal(3),
-  savedAt: isoTimestamp.optional(),
-  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-  writerId: id.nullable().optional(),
   data: legacyDataV3,
   settings: legacySettingsV3
-}).strict();
+});
 
 const snapshotV8Schema = snapshotV7Schema.extend({
   schemaVersion: z.literal(CURRENT_SNAPSHOT_VERSION),
-  data: z.object({ ...dataV7.shape, travelPauses: z.array(travelPause).max(1_000) })
+  data: z.object({ ...dataV7.shape, travelPauses: z.array(travelPause).max(SYNC_COLLECTION_LIMITS.travelPauses) })
     .strict().superRefine(validateCollections("topic"))
 });
 
-export const snapshotSchema = z.union([snapshotV8Schema, snapshotV7Schema, snapshotV6Schema, snapshotV5Schema, snapshotV4Schema, snapshotV3Schema]);
+export const snapshotSchema = z.discriminatedUnion("schemaVersion", [
+  snapshotV8Schema, snapshotV7Schema, snapshotV6Schema,
+  snapshotV5Schema, snapshotV4Schema, snapshotV3Schema
+]);
 
 export const syncPutSchema = z.object({
   baseRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),

@@ -74,6 +74,12 @@ Set `BETTER_AUTH_URL=http://localhost:3000` for local development. Never commit 
 | `npm run build` | Make the production Next.js build |
 | `npm run check` | Typecheck, test, and build |
 
+## Browser client
+
+The ledger starts in `client/main.js`. The `ledger`, `storage`, `sync`, `backup`, and `ui` directories hold the feature modules. The browser and API share snapshot limits in `shared/ledger-contract.ts`.
+
+`npm run dev` watches the client sources. Tests and production builds generate the same single script for the offline shell. Edit the files under `client/` to change ledger behavior.
+
 ## Sync model
 
 Tally remains local-first:
@@ -123,11 +129,11 @@ are included in complete JSON and CSV backups.
 
 ## Updating
 
-Run the full check before deployment:
+Run the full check and apply the migration against the intended database before
+deployment. This update adds the table that stores sync receipts.
 
 ```powershell
 npm run check
+npm run db:migrate
 npx vercel deploy --prod
 ```
-
-If dependencies or database schema change, run `npm run db:migrate` against the intended database before the production deployment.

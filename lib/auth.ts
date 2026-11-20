@@ -1,6 +1,13 @@
+import {
+  MAX_PASSWORD_LENGTH,
+  MAX_USERNAME_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  MIN_USERNAME_LENGTH,
+  USERNAME_PATTERN
+} from "./credentials";
 import { betterAuth } from "better-auth";
 import { username } from "better-auth/plugins";
-import { pool } from "./db";
+import { getPool } from "./db";
 import { authOrigin, requireStrongSecret } from "./env";
 
 function createTallyAuth(allowSignUp: boolean) {
@@ -8,15 +15,15 @@ function createTallyAuth(allowSignUp: boolean) {
 
   return betterAuth({
     appName: "Tally",
-    database: pool,
+    database: getPool(),
     baseURL: origin,
     secret: requireStrongSecret("BETTER_AUTH_SECRET"),
     trustedOrigins: [origin],
     emailAndPassword: {
       enabled: true,
       disableSignUp: !allowSignUp,
-      minPasswordLength: 14,
-      maxPasswordLength: 128,
+      minPasswordLength: MIN_PASSWORD_LENGTH,
+      maxPasswordLength: MAX_PASSWORD_LENGTH,
       revokeSessionsOnPasswordReset: true
     },
     session: {
@@ -53,16 +60,23 @@ function createTallyAuth(allowSignUp: boolean) {
     },
     plugins: [
       username({
-        minUsernameLength: 3,
-        maxUsernameLength: 30,
-        usernameValidator: (value) => /^[A-Za-z0-9_]+$/.test(value)
+        minUsernameLength: MIN_USERNAME_LENGTH,
+        maxUsernameLength: MAX_USERNAME_LENGTH,
+        usernameValidator: (value) => USERNAME_PATTERN.test(value)
       })
     ]
   });
 }
 
-/** Normal runtime auth: public account creation is permanently disabled. */
-export const auth = createTallyAuth(false);
+type TallyAuth = ReturnType<typeof createTallyAuth>;
+let ownerAuth: TallyAuth | undefined;
+let bootstrapAuth: TallyAuth | undefined;
+
+export function getAuth(): TallyAuth {
+  return ownerAuth ??= createTallyAuth(false);
+}
 
 /** Used only by the token-protected, one-time owner bootstrap endpoint. */
-export const setupAuth = createTallyAuth(true);
+export function getSetupAuth(): TallyAuth {
+  return bootstrapAuth ??= createTallyAuth(true);
+}

@@ -178,10 +178,13 @@ database and encryption key. Reopen Tally after deployment and confirm that Data
 reports the cloud is up to date. If Tally reports a merge conflict, review the
 ledger before issuing another destructive change.
 
+Use the production database connection in `.env.local` as described in the
+initial setup. Run the migration before deploying this update so sync can
+write receipts to the new `tally_state_operations` table.
+
 ```powershell
 npm install
 npm run check
+npm run db:migrate
 npx vercel deploy --prod
 ```
-
-Run `npm run db:migrate` first if a future version changes database/auth schema.

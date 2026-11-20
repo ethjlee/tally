@@ -1,5 +1,7 @@
 import { getMigrations } from "better-auth/db/migration";
 import { config } from "dotenv";
+import { getAuth } from "../lib/auth";
+import { getPool } from "../lib/db";
 
 config({ path: ".env.local", override: false, quiet: true });
 
@@ -30,6 +32,14 @@ CREATE TABLE IF NOT EXISTS tally_state_history (
 CREATE INDEX IF NOT EXISTS tally_state_history_user_revision_idx
   ON tally_state_history (user_id, revision DESC);
 
+CREATE TABLE IF NOT EXISTS tally_state_operations (
+  user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  operation_id TEXT NOT NULL CHECK (operation_id ~ '^[A-Za-z0-9_-]{1,80}$'),
+  revision BIGINT NOT NULL CHECK (revision >= 1),
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (user_id, operation_id)
+);
+
 CREATE OR REPLACE FUNCTION tally_enforce_single_owner()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -59,12 +69,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM PUBLIC;
 `;
 
 async function main() {
-  const [{ auth }, { pool }] = await Promise.all([
-    import("../lib/auth"),
-    import("../lib/db")
-  ]);
+  const pool = getPool();
   try {
-    const { runMigrations } = await getMigrations(auth.options);
+    const { runMigrations } = await getMigrations(getAuth().options);
     await runMigrations();
     await pool.query(APP_MIGRATION);
     console.log("Tally database migration completed.");

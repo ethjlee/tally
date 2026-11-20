@@ -1,6 +1,13 @@
-import { timingSafeEqual } from "node:crypto";
+import {
+  MAX_PASSWORD_LENGTH,
+  MAX_USERNAME_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  MIN_USERNAME_LENGTH,
+  USERNAME_PATTERN,
+  setupTokensMatch
+} from "../../../lib/credentials";
 import { z } from "zod";
-import { setupAuth } from "../../../lib/auth";
+import { getSetupAuth } from "../../../lib/auth";
 import { ownerExists } from "../../../lib/db";
 import {
   privateJson,
@@ -14,17 +21,10 @@ export const dynamic = "force-dynamic";
 
 const setupSchema = z.object({
   setupToken: z.string().min(32).max(512),
-  username: z.string().min(3).max(30).regex(/^[A-Za-z0-9_]+$/),
+  username: z.string().min(MIN_USERNAME_LENGTH).max(MAX_USERNAME_LENGTH).regex(USERNAME_PATTERN),
   email: z.email().max(254),
-  password: z.string().min(14).max(128)
+  password: z.string().min(MIN_PASSWORD_LENGTH).max(MAX_PASSWORD_LENGTH)
 }).strict();
-
-function matchesSetupToken(candidate: string): boolean {
-  const expected = Buffer.from(requireStrongSecret("TALLY_SETUP_TOKEN"), "utf8");
-  const received = Buffer.from(candidate, "utf8");
-  if (received.length !== expected.length) return false;
-  return timingSafeEqual(received, expected);
-}
 
 export async function GET() {
   try {
@@ -57,11 +57,11 @@ export async function POST(request: Request) {
     if (await ownerExists()) {
       return privateJson({ error: "SETUP_ALREADY_COMPLETE" }, { status: 409 });
     }
-    if (!matchesSetupToken(body.setupToken)) {
+    if (!setupTokensMatch(body.setupToken, requireStrongSecret("TALLY_SETUP_TOKEN"))) {
       return privateJson({ error: "INVALID_SETUP_CREDENTIALS" }, { status: 403 });
     }
 
-    await setupAuth.api.signUpEmail({
+    await getSetupAuth().api.signUpEmail({
       headers: request.headers,
       body: {
         name: body.username,

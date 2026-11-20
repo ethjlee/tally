@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { pool } from "./db";
+import { getPool } from "./db";
 import { decryptState, encryptState, type EncryptedState } from "./crypto";
 import { CURRENT_SNAPSHOT_VERSION, type TallySnapshot } from "./snapshot";
 
@@ -12,6 +12,7 @@ type StateRow = {
   last_operation_id: string;
   updated_at: Date;
 };
+type WriteReceipt = Pick<StateRow, "revision" | "updated_at">;
 
 export type CloudState = {
   cloudRevision: number;
@@ -62,7 +63,7 @@ function stateFromRow(userId: string, row: StateRow | null): CloudState {
 }
 
 export async function getCloudState(userId: string): Promise<CloudState> {
-  const client = await pool.connect();
+  const client = await getPool().connect();
   try {
     return stateFromRow(userId, await selectState(client, userId));
   } finally {
@@ -74,6 +75,75 @@ export type PutStateResult =
   | { status: "written"; cloudRevision: number; updatedAt: string }
   | { status: "conflict"; current: CloudState };
 
+function writtenResult(receipt: WriteReceipt): Extract<PutStateResult, { status: "written" }> {
+  return {
+    status: "written",
+    cloudRevision: revisionNumber(receipt.revision),
+    updatedAt: new Date(receipt.updated_at).toISOString()
+  };
+}
+
+async function commitWrite(client: PoolClient, userId: string, operationId: string, receipt: WriteReceipt) {
+  await client.query(
+    `INSERT INTO tally_state_operations (user_id, operation_id, revision, updated_at)
+     VALUES ($1, $2, $3, $4)`,
+    [userId, operationId, receipt.revision, receipt.updated_at]
+  );
+  await client.query("COMMIT");
+  return writtenResult(receipt);
+}
+
+async function replaceState(
+  client: PoolClient,
+  userId: string,
+  current: StateRow,
+  writeValues: (string | number | Buffer)[]
+): Promise<WriteReceipt> {
+  await client.query(
+    `INSERT INTO tally_state_history
+       (user_id, revision, ciphertext, nonce, auth_tag, key_version, saved_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (user_id, revision) DO NOTHING`,
+    [
+      userId,
+      current.revision,
+      current.ciphertext,
+      current.nonce,
+      current.auth_tag,
+      current.key_version,
+      current.updated_at
+    ]
+  );
+
+  const updated = await client.query<WriteReceipt>(
+    `UPDATE tally_state
+        SET revision = revision + 1,
+            ciphertext = $2,
+            nonce = $3,
+            auth_tag = $4,
+            key_version = $5,
+            last_operation_id = $6,
+            updated_at = NOW()
+      WHERE user_id = $1
+      RETURNING revision, updated_at`,
+    writeValues
+  );
+
+  await client.query(
+    `DELETE FROM tally_state_history
+      WHERE user_id = $1
+        AND id NOT IN (
+          SELECT id
+            FROM tally_state_history
+           WHERE user_id = $1
+           ORDER BY revision DESC
+           LIMIT 10
+        )`,
+    [userId]
+  );
+  return updated.rows[0];
+}
+
 export async function putCloudState(
   userId: string,
   baseRevision: number,
@@ -81,50 +151,46 @@ export async function putCloudState(
   operationId: string
 ): Promise<PutStateResult> {
   const encrypted = encryptState(userId, snapshot);
-  const client = await pool.connect();
+  const writeValues = [
+    userId, encrypted.ciphertext, encrypted.nonce,
+    encrypted.authTag, encrypted.keyVersion, operationId
+  ];
+  const client = await getPool().connect();
 
   try {
     await client.query("BEGIN");
-    const current = await selectState(client, userId, true);
+    let current = await selectState(client, userId, true);
 
-    if (!current) {
-      if (baseRevision !== 0) {
-        await client.query("ROLLBACK");
-        return {
-          status: "conflict",
-          current: { cloudRevision: 0, snapshot: null, updatedAt: null }
-        };
-      }
-      const inserted = await client.query<{ revision: string; updated_at: Date }>(
+    if (!current && baseRevision === 0) {
+      const inserted = await client.query<WriteReceipt>(
         `INSERT INTO tally_state
            (user_id, revision, ciphertext, nonce, auth_tag, key_version, last_operation_id, updated_at)
          VALUES ($1, 1, $2, $3, $4, $5, $6, NOW())
+         ON CONFLICT (user_id) DO NOTHING
          RETURNING revision, updated_at`,
-        [
-          userId,
-          encrypted.ciphertext,
-          encrypted.nonce,
-          encrypted.authTag,
-          encrypted.keyVersion,
-          operationId
-        ]
+        writeValues
       );
-      await client.query("COMMIT");
-      return {
-        status: "written",
-        cloudRevision: revisionNumber(inserted.rows[0].revision),
-        updatedAt: new Date(inserted.rows[0].updated_at).toISOString()
-      };
+      if (inserted.rows[0]) return await commitWrite(client, userId, operationId, inserted.rows[0]);
+      current = await selectState(client, userId, true);
+    }
+    if (!current) {
+      await client.query("ROLLBACK");
+      return { status: "conflict", current: stateFromRow(userId, null) };
     }
 
     const currentRevision = revisionNumber(current.revision);
     if (current.last_operation_id === operationId) {
       await client.query("ROLLBACK");
-      return {
-        status: "written",
-        cloudRevision: currentRevision,
-        updatedAt: new Date(current.updated_at).toISOString()
-      };
+      return writtenResult(current);
+    }
+    // A retry can arrive after newer commits have rotated out its snapshot.
+    const receipts = await client.query<WriteReceipt>(
+      `SELECT revision, updated_at FROM tally_state_operations WHERE user_id = $1 AND operation_id = $2`,
+      [userId, operationId]
+    );
+    if (receipts.rows[0]) {
+      await client.query("ROLLBACK");
+      return writtenResult(receipts.rows[0]);
     }
     if (currentRevision !== baseRevision) {
       await client.query("ROLLBACK");
@@ -138,62 +204,8 @@ export async function putCloudState(
       }
     }
 
-    await client.query(
-      `INSERT INTO tally_state_history
-         (user_id, revision, ciphertext, nonce, auth_tag, key_version, saved_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (user_id, revision) DO NOTHING`,
-      [
-        userId,
-        currentRevision,
-        current.ciphertext,
-        current.nonce,
-        current.auth_tag,
-        current.key_version,
-        current.updated_at
-      ]
-    );
-
-    const updated = await client.query<{ revision: string; updated_at: Date }>(
-      `UPDATE tally_state
-          SET revision = revision + 1,
-              ciphertext = $2,
-              nonce = $3,
-              auth_tag = $4,
-              key_version = $5,
-              last_operation_id = $6,
-              updated_at = NOW()
-        WHERE user_id = $1
-        RETURNING revision, updated_at`,
-      [
-        userId,
-        encrypted.ciphertext,
-        encrypted.nonce,
-        encrypted.authTag,
-        encrypted.keyVersion,
-        operationId
-      ]
-    );
-
-    await client.query(
-      `DELETE FROM tally_state_history
-        WHERE user_id = $1
-          AND id NOT IN (
-            SELECT id
-              FROM tally_state_history
-             WHERE user_id = $1
-             ORDER BY revision DESC
-             LIMIT 10
-          )`,
-      [userId]
-    );
-
-    await client.query("COMMIT");
-    return {
-      status: "written",
-      cloudRevision: revisionNumber(updated.rows[0].revision),
-      updatedAt: new Date(updated.rows[0].updated_at).toISOString()
-    };
+    const receipt = await replaceState(client, userId, current, writeValues);
+    return await commitWrite(client, userId, operationId, receipt);
   } catch (error) {
     try {
       await client.query("ROLLBACK");
@@ -201,11 +213,6 @@ export async function putCloudState(
       // Preserve the original error.
     }
 
-    // Two transactions can both observe an empty state. The primary key makes
-    // the second insert lose safely; return the winner as a normal conflict.
-    if ((error as { code?: string }).code === "23505") {
-      return { status: "conflict", current: await getCloudState(userId) };
-    }
     throw error;
   } finally {
     client.release();

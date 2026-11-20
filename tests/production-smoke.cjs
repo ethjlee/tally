@@ -51,11 +51,30 @@ function waitForReady(timeoutMs = 15_000) {
     const client = await fetch(`http://127.0.0.1:${port}${clientPath}`);
     assert.equal(client.status, 200);
     assert.match(client.headers.get("content-type") || "", /javascript/);
-    assert.match(await client.text(), /function loadAll\(\)/);
+    const clientCode = await client.text();
+    assert.match(clientCode, /function loadAll\(\)/);
+    for (const route of ["/tally.js", "/tally-v7.js", "/tally-v16.js"]) {
+      const legacyClient = await fetch(`http://127.0.0.1:${port}${route}`);
+      assert.equal(legacyClient.status, 200);
+      assert.equal(await legacyClient.text(), clientCode);
+    }
+    for (const route of ["/login.js", "/setup.js", "/account.js", "/auth-form.js"]) {
+      const script = await fetch(`http://127.0.0.1:${port}${route}`);
+      assert.equal(script.status, 200);
+      assert.match(script.headers.get("content-type") || "", /javascript/);
+    }
     const precachePath = clientPath.replace(/\.js$/, ".html");
     const precachePage = await fetch(`http://127.0.0.1:${port}${precachePath}`);
     assert.equal(precachePage.status, 200);
     assert.equal(await precachePage.text(), markup);
+    for (const version of [7, 13, 18]) {
+      const legacyPage = await fetch(`http://127.0.0.1:${port}/tally-v${version}.html`);
+      assert.equal(legacyPage.status, 200);
+      assert.equal(await legacyPage.text(), markup.replace(clientPath, `/tally-v${version}.js`));
+      const legacyScript = await fetch(`http://127.0.0.1:${port}/tally-v${version}.js`);
+      assert.equal(legacyScript.status, 200);
+      assert.equal(await legacyScript.text(), clientCode);
+    }
 
     const worker = await fetch(`http://127.0.0.1:${port}/sw.js`);
     assert.equal(worker.status, 200);

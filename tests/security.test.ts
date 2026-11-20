@@ -33,9 +33,10 @@ test("single-owner enforcement exists at auth, setup, and database layers", () =
   const auth = read("lib/auth.ts");
   const setup = read("app/api/setup/route.ts");
   const migration = read("scripts/migrate.ts");
-  assert.match(auth, /export const auth = createTallyAuth\(false\)/);
+  assert.match(auth, /ownerAuth \?\?= createTallyAuth\(false\)/);
   assert.match(setup, /await ownerExists\(\)/);
-  assert.match(setup, /timingSafeEqual/);
+  assert.match(setup, /setupTokensMatch\(body\.setupToken,/);
+  assert.match(read("lib/credentials.ts"), /timingSafeEqual\(received, configured\)/);
   assert.match(migration, /pg_advisory_xact_lock/);
   assert.match(migration, /tally_single_owner_guard/);
 });
@@ -69,7 +70,7 @@ test("cloud conflict and retry protections are present", () => {
 });
 
 test("current backup reminder and unknown-day behavior remain in the deployed client", () => {
-  const client = read("public/tally.js");
+  const client = read("public/assets/ledger.js");
   assert.match(client, /backupReminderDays/);
   assert.match(client, /Unknown days are excluded and pause your success streak/);
   assert.match(client, /chart-score-gap/);

@@ -7,11 +7,10 @@ import {
 import { requireSession } from "../../../lib/session";
 import { getCloudState, putCloudState } from "../../../lib/state-store";
 import { parseSnapshot, syncPutSchema } from "../../../lib/snapshot";
+import { MAX_SYNC_BYTES } from "../../../shared/ledger-contract";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const MAX_SYNC_BYTES = 5 * 1024 * 1024;
 
 export async function GET(request: Request) {
   const { session, sessionHeaders } = await requireSession(request);

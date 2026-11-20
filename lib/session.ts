@@ -1,7 +1,7 @@
-import { auth } from "./auth";
+import { getAuth } from "./auth";
 
 export async function requireSession(request: Request) {
-  const { response, headers } = await auth.api.getSession({
+  const { response, headers } = await getAuth().api.getSession({
     headers: request.headers,
     returnHeaders: true
   });
